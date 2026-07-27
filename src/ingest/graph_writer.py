@@ -6,7 +6,7 @@ source_chunk_id and confidence. Re-running ingestion is a no-op.
 
 from __future__ import annotations
 
-from src.schemas import Entity, Relation
+from src.schemas import Entity, Relationship
 
 
 def write_entities(entities: list[Entity]) -> None:
@@ -14,6 +14,6 @@ def write_entities(entities: list[Entity]) -> None:
     raise NotImplementedError
 
 
-def write_relations(relations: list[Relation]) -> None:
+def write_relations(relations: list[Relationship]) -> None:
     """MERGE relationships, attaching source_chunk_id and confidence."""
     raise NotImplementedError

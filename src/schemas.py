@@ -1,4 +1,9 @@
-"""Shared Pydantic models: ontology-constrained extraction + API contracts."""
+"""Shared Pydantic models: ontology-constrained extraction + API contracts.
+
+The ontology (9 entity types, 11 relationship types) is defined once in
+src/ingest/extract.py and re-exported here, so there is a single source of
+truth. Import Entity/Relationship/Extraction from either module.
+"""
 
 from __future__ import annotations
 
@@ -6,48 +11,25 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-EntityType = Literal[
-    "Regulation",
-    "Article",
-    "Annex",
-    "ActorRole",
-    "Obligation",
-    "RiskCategory",
-    "SystemType",
-    "Authority",
+from src.ingest.extract import (
+    Entity,
+    EntityType,
+    Extraction,
+    RelationType,
+    Relationship,
+)
+
+__all__ = [
+    "Entity",
+    "EntityType",
+    "Extraction",
+    "RelationType",
+    "Relationship",
+    "Chunk",
+    "Citation",
+    "AskRequest",
+    "AskResponse",
 ]
-
-RelationType = Literal[
-    "DEFINED_IN",
-    "IMPOSES",
-    "APPLIES_TO",
-    "CLASSIFIED_AS",
-    "LISTED_IN",
-    "REFERENCES",
-    "ENFORCED_BY",
-    "PENALIZED_UNDER",
-    "EXEMPT_FROM",
-    "INTERACTS_WITH",
-]
-
-
-class Entity(BaseModel):
-    type: EntityType
-    canonical_name: str
-    aliases: list[str] = Field(default_factory=list)
-
-
-class Relation(BaseModel):
-    type: RelationType
-    head: str
-    tail: str
-    source_chunk_id: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
-class Extraction(BaseModel):
-    entities: list[Entity] = Field(default_factory=list)
-    relationships: list[Relation] = Field(default_factory=list)
 
 
 class Chunk(BaseModel):

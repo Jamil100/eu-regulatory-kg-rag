@@ -177,3 +177,15 @@ The fix is not more careful checking. It's writing down what I expect *before* I
 then comparing — because after the fact, whatever came out looks reasonable.
 
 ---
+
+The ontology asserted legally false facts until the extraction test caught it. The first extraction schema had eight entity types and ten relationship types, all mandatory or prohibitive in flavour (IMPOSES, EXEMPT_FROM, ENFORCED_BY). It had no way to express permission. On a 10-chunk test run, GDPR Article 6's six lawful bases — consent, contract, legitimate interests, and so on — were extracted as six Obligations connected by IMPOSES at 0.95 confidence. But Article 6(1) imposes no duties; it says processing is lawful if at least one basis applies. The graph was asserting six simultaneous mandatory obligations that don't exist, and would have answered "what must a controller do under Article 6?" with six inventions.
+
+The same distortion turned the Article 9(2) derogations into thirteen phantom obligations and produced enforcement edges on "Union or Member State law" that the text never states.
+
+What caught it: testing extraction on ten deliberately varied chunks before running the corpus, and reading the output rather than trusting a 0% validation-failure rate. Every extraction was schema-valid — Pydantic was satisfied. The facts were still wrong. Schema validity measures whether the model filled the shape; it says nothing about whether the shape can represent the domain.
+
+What I changed: added a LawfulBasis entity type and a PERMITS relationship — the permissive counterpart to IMPOSES the ontology had been missing. Re-tested the affected chunks plus a control chunk (a genuine obligation) to confirm the new permissive rule didn't bleed into real duties.
+
+Known limitation left in place: PERMITS records that a basis makes something lawful, but not that the bases are alternatives ("at least one of"). Encoding n-ary one-of constraints in a property graph is a research-grade problem; I flagged it rather than solved it, and the vector path still carries the exact disjunctive wording for any query that needs it.
+
+---
