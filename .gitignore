@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+
+# Data & caches (EUR-Lex sources + extraction cache)
+data/
+!data/.gitkeep
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

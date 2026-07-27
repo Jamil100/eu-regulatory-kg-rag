@@ -1,0 +1,6 @@
+{"id": "sh-001", "stratum": "single-hop", "question": "How does the AI Act define a 'deployer'?", "gold": ""}
+{"id": "th-001", "stratum": "two-hop", "question": "Which transparency obligations apply to deployers of emotion recognition systems?", "gold": ""}
+{"id": "3h-001", "stratum": "three-hop", "question": "A German company deploys a high-risk system from Annex III — which authority enforces the documentation obligations and under which article are violations fined?", "gold": ""}
+{"id": "xr-001", "stratum": "cross-regulation", "question": "How do the AI Act's data governance requirements in Article 10 interact with GDPR lawful-basis requirements?", "gold": ""}
+{"id": "ag-001", "stratum": "aggregation", "question": "List every obligation that applies to providers of GPAI models.", "gold": ""}
+{"id": "oos-001", "stratum": "out-of-scope", "question": "What does the US AI Executive Order require?", "gold": "REFUSE: corpus does not cover US regulation."}

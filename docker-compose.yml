@@ -1,0 +1,41 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: kgrag-neo4j
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: kgrag-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: kgrag
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: kgrag
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./src/index/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kgrag -d kgrag"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  pg_data:
