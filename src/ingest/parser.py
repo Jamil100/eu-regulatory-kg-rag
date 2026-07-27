@@ -157,8 +157,11 @@ def paragraphs(art: ET.Element) -> list[dict]:
     ]
 
     if not para_divs:
-        # 19 articles (3, 4, 16, 32, 39, 66, 85, 87, 94, 102-110, 113) are a
-        # single block of prose. Article 3 (Definitions) is one ~2600-word chunk.
+        # 18 articles (4, 16, 32, 39, 66, 85, 87, 94, 102-110, 113) are a single
+        # block of prose. Article 3 (Definitions) has the same no-numbered-div
+        # shape but is a list of 68 entries, not one block -- see
+        # `definitions()`/`parse_definitions()` below, which the chunker uses for
+        # it and for GDPR Article 4 instead of this fallback.
         parts = [
             text_of(child)
             for child in art
@@ -198,6 +201,55 @@ def parse(html_path: Path) -> list[dict]:
         }
         for number, art in iter_articles(root)
     ]
+
+
+DEFINITION_MARKER = re.compile(r"\((\d+)\)")
+
+
+def definitions(art) -> list[dict]:
+    """Numbered definitions of a definitions-style article (AIA Art 3, GDPR Art 4).
+
+    These articles have no numbered paragraph divs -- `paragraphs()`'s fallback
+    would flatten them into one oversized chunk (2,619 words for AIA Art 3). The
+    actual shape is one `<table>` per entry, marker "(37)" in the first cell, text
+    in the second. `text_of()` on that second cell already inlines any nested
+    sub-point tables (e.g. AIA def(45)/(49)/(61), GDPR def(16)/(22)/(23)), so this
+    only needs to split the top-level tables, not re-implement text extraction.
+    """
+    out: list[dict] = []
+    for child in art:
+        if _tag(child) != "table":
+            continue
+        cells: list[str] = []
+        for block in child:
+            if _tag(block) not in ("tbody", "thead", "tfoot"):
+                continue
+            for row in block:
+                if _tag(row) != "tr":
+                    continue
+                cells = [text_of(cell) for cell in row if _tag(cell) in ("td", "th")]
+        if len(cells) < 2:
+            continue
+        match = DEFINITION_MARKER.fullmatch(cells[0])
+        if match:
+            out.append({"definition": int(match.group(1)), "text": cells[-1]})
+    return out
+
+
+def parse_definitions(html_path: Path, article: int) -> dict:
+    """Parse a definitions-style article into `parse()`-shaped structure.
+
+    Returns ``{"article": 3, "article_title": "Definitions",
+    "definitions": [{"definition": 1, "text": "..."}, ...]}`` -- the same shape as
+    one element of `parse()`'s output, with `definitions` in place of `paragraphs`.
+    """
+    root = load_body(html_path)
+    art = next(el for el in root.iter() if _tag(el) == "div" and el.get("id") == f"art_{article}")
+    return {
+        "article": article,
+        "article_title": article_title(art),
+        "definitions": definitions(art),
+    }
 
 
 if __name__ == "__main__":

@@ -54,6 +54,35 @@ def chunk(articles: list[dict], regulation: str) -> list[dict]:
     return rows
 
 
+def make_definition_chunk_id(regulation: str, article: int, definition: int) -> str:
+    """Deterministic chunk id for a numbered definition, e.g. `aia-art3-def37`.
+
+    The number is the definition's own number from the source, not a running
+    counter -- it has to match how the law cites itself ("point (37) of Article 3").
+    """
+    return f"{regulation.lower()}-art{article}-def{definition}"
+
+
+def chunk_definitions(parsed: dict, regulation: str) -> list[dict]:
+    """One chunk per numbered definition. No `paragraph` key, unlike `chunk()`."""
+    rows: list[dict] = []
+    for d in parsed["definitions"]:
+        rows.append(
+            {
+                "chunk_id": make_definition_chunk_id(
+                    regulation, parsed["article"], d["definition"]
+                ),
+                "regulation": regulation,
+                "article": parsed["article"],
+                "article_title": parsed["article_title"],
+                "definition": d["definition"],
+                "text": d["text"],
+                "token_count": len(d["text"].split()),
+            }
+        )
+    return rows
+
+
 def chunk_annexes(annexes: list[dict], regulation: str) -> list[dict]:
     """Split parsed annex structure at the point level into chunk records.
 
