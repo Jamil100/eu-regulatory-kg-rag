@@ -60,6 +60,16 @@ def _normalise(text: str) -> str:
     return WHITESPACE.sub(" ", text).strip()
 
 
+def _clean_title(text: str) -> str:
+    """Drop stray typographic artifacts from a title.
+
+    The source carries exactly one: `<p class="oj-sti-art">Subject matter`</p>` in
+    Article 1 -- the only backtick in the whole file. Body text is left verbatim so
+    citations still quote the real sentence; only titles are normalised.
+    """
+    return _normalise(text.replace("`", ""))
+
+
 def _walk(el: ET.Element) -> list[str]:
     """Recursively collect text fragments, tables handled row by row."""
     out: list[str] = []
@@ -130,7 +140,7 @@ def article_title(art: ET.Element) -> str:
         if _tag(child) == "div" and "eli-title" in _classes(child):
             for sub in child:
                 if _tag(sub) == "p" and "oj-sti-art" in _classes(sub):
-                    return text_of(sub)
+                    return _clean_title(text_of(sub))
     return ""
 
 

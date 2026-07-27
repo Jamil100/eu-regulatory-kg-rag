@@ -13,6 +13,7 @@ import json
 import sys
 from pathlib import Path
 
+from src.ingest.annex_parser import parse_annexes
 from src.ingest.parser import parse
 
 REGULATION_BY_STEM = {"eu-ai-act": "AIA", "gdpr": "GDPR"}
@@ -21,6 +22,17 @@ REGULATION_BY_STEM = {"eu-ai-act": "AIA", "gdpr": "GDPR"}
 def make_chunk_id(regulation: str, article: int, paragraph: int) -> str:
     """Deterministic, human-readable chunk id, e.g. `aia-art26-para1`."""
     return f"{regulation.lower()}-art{article}-para{paragraph}"
+
+
+def make_annex_chunk_id(regulation: str, annex: int, section: str | None, point: int) -> str:
+    """Annex chunk id, e.g. `aia-annex3-point1` or `aia-annex8-sectionB-point1`.
+
+    The section appears only for annexes whose point numbers restart per section
+    (VIII and XI); without it those ids would collide and silently corrupt the
+    vector-index/graph join.
+    """
+    section_part = f"-section{section}" if section else ""
+    return f"{regulation.lower()}-annex{annex}{section_part}-point{point}"
 
 
 def chunk(articles: list[dict], regulation: str) -> list[dict]:
@@ -37,6 +49,31 @@ def chunk(articles: list[dict], regulation: str) -> list[dict]:
                     "paragraph": para["paragraph"],
                     "text": para["text"],
                     "token_count": len(para["text"].split()),
+                }
+            )
+    return rows
+
+
+def chunk_annexes(annexes: list[dict], regulation: str) -> list[dict]:
+    """Split parsed annex structure at the point level into chunk records.
+
+    Annex rows carry `annex`/`point` where article rows carry `article`/`paragraph`;
+    downstream code branches on which keys are present, so there is no shared field.
+    """
+    rows: list[dict] = []
+    for annex in annexes:
+        for p in annex["points"]:
+            rows.append(
+                {
+                    "chunk_id": make_annex_chunk_id(
+                        regulation, annex["annex_arabic"], p["section"], p["point"]
+                    ),
+                    "regulation": regulation,
+                    "annex": annex["annex"],
+                    "annex_title": annex["annex_title"],
+                    "point": p["point"],
+                    "text": p["text"],
+                    "token_count": len(p["text"].split()),
                 }
             )
     return rows
@@ -63,10 +100,12 @@ def main(argv: list[str]) -> int:
         print(f"cannot infer regulation from {html_path.name!r} (known: {known})", file=sys.stderr)
         return 2
 
-    rows = chunk(parse(html_path), regulation)
+    articles = chunk(parse(html_path), regulation)
+    annexes = chunk_annexes(parse_annexes(html_path), regulation)
+    rows = articles + annexes
     out_path = Path("data/processed/chunks.jsonl")
     write_jsonl(rows, out_path)
-    print(f"{len(rows)} chunks -> {out_path}")
+    print(f"{len(rows)} chunks ({len(articles)} article + {len(annexes)} annex) -> {out_path}")
     return 0
 
 
