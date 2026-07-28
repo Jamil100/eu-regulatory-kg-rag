@@ -178,14 +178,91 @@ then comparing — because after the fact, whatever came out looks reasonable.
 
 ---
 
-The ontology asserted legally false facts until the extraction test caught it. The first extraction schema had eight entity types and ten relationship types, all mandatory or prohibitive in flavour (IMPOSES, EXEMPT_FROM, ENFORCED_BY). It had no way to express permission. On a 10-chunk test run, GDPR Article 6's six lawful bases — consent, contract, legitimate interests, and so on — were extracted as six Obligations connected by IMPOSES at 0.95 confidence. But Article 6(1) imposes no duties; it says processing is lawful if at least one basis applies. The graph was asserting six simultaneous mandatory obligations that don't exist, and would have answered "what must a controller do under Article 6?" with six inventions.
+# Extraction: the ontology had no way to say "you may"
 
-The same distortion turned the Article 9(2) derogations into thirteen phantom obligations and produced enforcement edges on "Union or Member State law" that the text never states.
+One failure, found on a 10-chunk test run before the full corpus. It produced legally false
+facts at high confidence, and every single one of them passed validation.
 
-What caught it: testing extraction on ten deliberately varied chunks before running the corpus, and reading the output rather than trusting a 0% validation-failure rate. Every extraction was schema-valid — Pydantic was satisfied. The facts were still wrong. Schema validity measures whether the model filled the shape; it says nothing about whether the shape can represent the domain.
+Full decision record: `docs/adr/adr-0007-lawfulbasis-permits.md`.
 
-What I changed: added a LawfulBasis entity type and a PERMITS relationship — the permissive counterpart to IMPOSES the ontology had been missing. Re-tested the affected chunks plus a control chunk (a genuine obligation) to confirm the new permissive rule didn't bleed into real duties.
+## 1. Six lawful bases extracted as six obligations that don't exist
 
-Known limitation left in place: PERMITS records that a basis makes something lawful, but not that the bases are alternatives ("at least one of"). Encoding n-ary one-of constraints in a property graph is a research-grade problem; I flagged it rather than solved it, and the vector path still carries the exact disjunctive wording for any query that needs it.
+**What happened.** The first ontology had eight entity types and ten relationship types. Every
+relationship expressed either a duty (`IMPOSES`) or a prohibition (`CLASSIFIED_AS` prohibited,
+`EXEMPT_FROM`, `ENFORCED_BY`). None expressed permission.
+
+Regulations make three basic moves. The ontology could represent two of them:
+
+| Legal move | Representation | Covered? |
+|---|---|---|
+| You **must** | `IMPOSES` → `Obligation` | yes |
+| You **must not** | `CLASSIFIED_AS` prohibited | yes |
+| You **may, if** | — | **no** |
+
+GDPR Article 6 is entirely the third move, so it had nowhere valid to land. The extractor put it
+in the nearest available slot: the six lawful bases — consent, contract, legitimate interests and
+the rest — came out as six `Obligation` entities wired to Article 6(1) by `IMPOSES`, each at
+**0.95 confidence**.
+
+**Why it mattered.** Article 6(1) imposes no duties. It says processing is lawful if *at least
+one* basis applies — permissive, alternative conditions. The graph was asserting six simultaneous
+mandatory duties that do not exist, and would have answered *"what must a controller do under
+Article 6?"* with six inventions.
+
+The same distortion hit the Article 9(2) derogations, turning them into thirteen phantom
+obligations, and produced `ENFORCED_BY` edges on "Union or Member State law" that the text never
+states. One root cause behind all of it.
+
+**What caught it.** Running extraction on ten deliberately varied chunks first, and *reading the
+output* instead of trusting the aggregate metric. The metric said the run was clean: **0% Pydantic
+validation failure.** Every record was schema-valid. Every record was also wrong.
+
+**What I changed.**
+- `DONE` — Added `LawfulBasis` (9th entity type) and `PERMITS` (11th relationship type) — the
+  permissive counterpart to `IMPOSES`. Both are locked into the `Literal` types in
+  `src/ingest/extract.py`, so anything outside the ontology fails validation instead of entering
+  the graph. `tests/test_schemas.py` covers both.
+- `DONE` — The extraction system prompt in `src/ingest/extract.py` carries an explicit
+  disambiguation rule ("lawful/permitted if a condition holds" → `LawfulBasis` + `PERMITS`, never
+  `Obligation` + `IMPOSES`) plus a few-shot example built from GDPR Art. 6(1).
+- `DONE` — Re-tested the affected chunks alongside a **control chunk** (`aia-art9-para1`, a
+  genuine obligation) to confirm the new permissive rule fixed the false duties without bleeding
+  into real ones.
+- `OPEN` — The tests only assert that the two new types are *accepted by the schema*. Nothing
+  checks extractor **behaviour** — that a permission-bearing chunk yields no `Obligation`. A
+  regression in the prompt would be schema-valid and silent, exactly like the original bug. Needs
+  a fixture-based test on `gdpr-art6-para1` + the control chunk.
+
+**Known limitation, left in place deliberately.** `PERMITS` records *that* a basis makes something
+lawful, but not that the bases are **alternatives** ("at least one of"). The graph shows six
+`PERMITS` edges without encoding that satisfying one suffices. Modelling n-ary one-of constraints
+in a property graph is a research-grade problem, so it is flagged rather than solved — and the
+vector path still carries the exact disjunctive wording for any query that needs it.
+
+## What I learned
+
+**Validity is not correctness.** A 0% validation-failure rate measures whether the model filled
+the shape. It says nothing about whether the shape can represent the domain. The cleanest metric
+in the run was produced by the broken part.
+
+**A missing type doesn't leave a gap — it produces the nearest wrong answer.** The absence of
+`PERMITS` didn't yield empty fields or low confidence. It yielded confident, well-formed,
+plausible-looking obligations. An ontology hole shows up as fluent wrong output, never as an
+error.
+
+**Confidence scores describe fit to the schema, not truth.** 0.95 on six fabrications. The model
+was correctly certain it had picked the best available type; the type set was the problem.
+
+**Design ontologies by opposites.** For every relationship type, ask what its inverse is and
+whether the corpus contains it. `IMPOSES` had no `PERMITS`. Ten minutes of that question against
+a permission-heavy regulation like the GDPR would have found this before any code ran.
+
+**Vary test chunks by legal function, not by source.** The ten chunks caught this because they
+spanned duties, permissions, definitions and derogations — not because they came from different
+articles. Ten obligation-shaped chunks would have scored 0% failure and taught me nothing.
+
+This is the ingestion common thread wearing different clothes. There I confirmed the part I was
+looking at and assumed it covered the whole; here I confirmed the *shape* of the output and
+assumed it covered the meaning. Same shortcut, one level up.
 
 ---
