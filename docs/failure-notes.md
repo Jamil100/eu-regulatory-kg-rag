@@ -9,7 +9,11 @@ A change is marked `DONE` only if code in this repo enforces it.
 
 ## Measured rates
 
-- Extraction Pydantic-validation failure rate: _TBD_
+- Extraction Pydantic-validation failure rate: **0.09%** (1 of 1108 chunks, full
+  corpus, ontology v3). Was 0.27% before raising `max_tokens`; every failure was
+  output truncation, not a modelling error.
+- Extraction edge-endpoint violation rate: **5.3%** of relationships (357 of 6767)
+- Orphan-entity rate: **8.4%** of entities (628 of 7466)
 - Entity-resolution false merges / misses: _TBD_
 - Router misclassification rate: _TBD_
 - Citation-validation rejection rate: _TBD_
@@ -378,5 +382,112 @@ Pydantic validation reported 0% failure while asserting that Article 5 carries n
 Every time, the ontology hole showed up as fluent, confident, well-formed wrong output — never as
 an error, never as a gap, never as low confidence. **Design ontologies by opposites** was the
 lesson from ADR-0007 and it was right; I just did not run it a second time after adding `PERMITS`.
+
+---
+
+# The full corpus run: four ways to lose a run, three of them mine
+
+Final state: **1107 of 1108 chunks extracted (99.9%)**, 7,466 entities, 6,767 relationships, at
+roughly **$24** against a $23.13 estimate. It took four attempts.
+
+## 1. One bad chunk killed 215 chunks of work
+
+**What happened.** At chunk 215 the API returned `422 NO_VALID_RESPONSE_GENERATED`. The run died
+with a traceback.
+
+**Why it mattered.** `extract_chunk` catches `(ValidationError, JSONDecodeError, TypeError)` — the
+three ways a *response* can be wrong. It does not catch the API refusing to produce one. That
+exception went straight through `main()` and ended everything.
+
+Worse: results were written only after the loop finished. So the crash left `extractions.jsonl` at
+**29 rows after 215 chunks of completed work.** The disk cache meant no money was lost, and that is
+exactly what made the gap easy to miss — the *expensive* resource was protected, so the fragility
+of the *cheap* one never came up.
+
+**What I changed.**
+- `DONE` — API errors are caught per chunk, recorded to `failures.jsonl`, and the run continues.
+  No retry: `temperature=0` with a fixed seed means the identical request fails identically.
+- `DONE` — `flush()` writes every `FLUSH_EVERY` (25) chunks and on `KeyboardInterrupt`.
+
+**What I learned.** I protected the resource that costs money and forgot the one that costs time.
+A cache that makes crashes free to *recover from* quietly removes the pressure to make them rare.
+
+The fix proved itself immediately: the next run was killed at chunk 906 and left **893 rows on
+disk** instead of 29.
+
+## 2. The key was a trial key, and I was told twice
+
+**What happened.** The 422's response headers carried `x-endpoint-monthly-call-limit: 1000` and
+`x-trial-endpoint-call-limit: 20`. The corpus needs 1108 calls.
+
+I had flagged "confirm the key is production" in the plan and again in the pre-run summary, then
+started the run without checking. Verifying it takes one request and reading two headers.
+
+**Why it mattered.** It cost a wasted run and a full diagnostic detour. It also hid: the 20/min
+trial limit never triggered a 429, because sequential extraction runs at ~10/min. **The rate limit
+I had built retry logic for was not the limit that was going to stop me.**
+
+**What I changed.**
+- `DONE` — Production keys return *no* trial headers at all. That absence is now the check, and it
+  runs before the run rather than after the failure.
+
+**What I learned.** Writing a risk down is not mitigating it. The check was in the plan in two
+places and neither made it into the sequence of commands I actually ran.
+
+## 3. `failures.jsonl` is destroyed by the next full run
+
+`write_jsonl` keeps rows whose `chunk_id` is not in `touched`. On `--all`, `touched` is every chunk,
+so every prior failure row is dropped and replaced by this run's.
+
+For *extractions* that is correct. For *failures* it means the raw response and validation error —
+the only evidence of what went wrong — are gone the moment you re-run, before anyone reads them.
+I recovered the count from console logs; the detail was already unrecoverable.
+
+- `OPEN` — Append failures with a run timestamp instead of replacing them, or write them to a
+  per-run file. Not built.
+
+## 4. Three chunks were truncated, and truncation does not look like truncation
+
+**What happened.** Three chunks failed validation with `Unterminated string`, `Expecting ','`, and
+`Expecting value` — at character 14165, 16450 and 16330. Three different JSON errors, one cause:
+the response hit `max_tokens` and stopped mid-object.
+
+Nothing in the error says "too long." The `truncated at max_tokens: 3` counter in the run report is
+what matched them up, and it only existed because it was added for an unrelated reason.
+
+**What I changed.**
+- `DONE` — `MAX_TOKENS` 4096 → **8192**, which fixed two of the three. It is not in `cache_key`, so
+  this re-called 3 chunks rather than 1108.
+- `DONE` — 8192 is Command A's hard ceiling; 16384 and 32768 both return HTTP 400. Written into the
+  constant so nobody re-tests it.
+
+**Still failing: `gdpr-art70-para1`.** The corpus's largest chunk — 864 tokens, 33 lettered
+sub-points, the EDPB's full task list. Its extraction does not fit in 8192 output tokens at all.
+This is a **chunking** failure surfacing at extraction: ADR-0003 chose paragraph-level chunking, and
+this is one paragraph that is too large for the model's entire output budget. `rechunk_definitions.py`
+already sets the precedent for splitting oversized units, but re-chunking now would change
+`chunk_id`s and the corpus count, which ripples into both stores.
+
+- `OPEN` — Split oversized paragraphs at the chunker, the way definitions already are. Deferred
+  because the chunk_id contract is now load-bearing.
+
+The text is still in the vector store, so the vector path can answer from it. Only the graph path
+loses those edges — and they are EDPB task assignments, exactly the "which authority does what"
+content the graph is meant to be good at.
+
+**What I learned.** A hard model limit is a *corpus design* constraint, not a parameter to tune. I
+found the ceiling by raising the number until the API said no, which is the right way to find it and
+the wrong time to be finding it — that probe costs one request and belongs in Phase 1 planning,
+next to the token-count histogram I had already built.
+
+## What I learned overall
+
+**Every one of these was in the plan except the truncation.** Retry hardening, key verification,
+resumability — all written down, none of them load-bearing until they failed. The plan was not
+wrong; it just was not a checklist, and I treated it as prose.
+
+**The failure modes moved down the stack as the obvious ones got fixed.** Ontology (v1) → prompt
+(v2/v3) → error handling → credentials → model limits. Each layer looked fine until the one above
+it stopped failing loudly enough to hide it.
 
 ---

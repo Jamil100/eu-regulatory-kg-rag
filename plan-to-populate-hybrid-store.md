@@ -161,9 +161,25 @@ little; shortening it to save 10% is the wrong direction.
 
 ---
 
-## Step 1 — The full extraction run
+## ~~Step 1 — The full extraction run~~ ✅ DONE — 1107/1108 (99.9%), ≈$24
 
-### 1a. Harden `call_model` first (do not skip)
+> **Outcome.** Took four attempts: an uncaught API error killed the run at chunk 215, then two
+> external kills at 906 and 1012. No work lost — the disk cache preserved every paid call, and the
+> newly-added `flush()` preserved the output file (893 rows survived the second kill, versus 29 after
+> the first crash). Final: **1107 chunks, 7,466 entities, 6,767 relationships, 0.09% validation
+> failure rate.** Estimate held to within ~4%.
+>
+> **Fixes forced by the run:** API errors caught per-chunk rather than killing the run; incremental
+> flush every 25 chunks; `MAX_TOKENS` 4096 → 8192 (Command A's hard ceiling — 16384 and 32768 both
+> HTTP 400). Added `src/ingest/audit.py` for the Step 2 numbers.
+>
+> **`gdpr-art70-para1` did not extract** — 864 tokens, 33 sub-points, JSON exceeds 8192 output
+> tokens at any setting. A chunking constraint, not a tuning one. Text remains in the vector path.
+>
+> **Two `OPEN` items** in `docs/failure-notes.md`: `failures.jsonl` detail is destroyed by the next
+> `--all`, and oversized paragraphs need splitting at the chunker.
+
+### ~~1a. Harden `call_model` first (do not skip)~~ ✅
 
 `call_model` (`extract.py:290`) calls `client.chat` with no retry wrapper. `tenacity` is already a
 declared dependency in `pyproject.toml` and unused here. 1,108 sequential calls will likely hit a

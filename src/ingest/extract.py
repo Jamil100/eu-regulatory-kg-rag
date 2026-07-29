@@ -26,8 +26,17 @@ from pathlib import Path
 from typing import Literal
 
 import cohere
+import cohere.errors
+import httpx
+from cohere.core import ApiError
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 load_dotenv()
 
@@ -45,7 +54,25 @@ FAILURES_PATH = ROOT / "data" / "processed" / "failures.jsonl"
 CACHE_DIR = ROOT / "data" / "cache" / "extraction"
 
 MODEL = os.getenv("MODEL_EXTRACT", "command-a-03-2025")
-MAX_TOKENS = 4096
+
+# 4096 truncated exactly 3 of 1108 chunks -- long enumerated task lists (AIA
+# Art. 66, GDPR Art. 57 and 70) whose JSON was cut mid-string and then failed to
+# parse. Truncation shows up as a JSON error, not as an obvious "too long", so
+# the `truncated at max_tokens` counter in the run report is what identifies it.
+# Not part of cache_key, so raising this re-calls only the chunks that failed.
+#
+# 8192 is Command A's HARD CEILING -- 16384 and 32768 both return HTTP 400
+# ("max tokens must be less than or equal to 8192, the maximum output length for
+# this model"). Do not re-test. Raising it fixed 2 of the 3; gdpr-art70-para1 is
+# the corpus's largest chunk (864 tokens, 33 lettered sub-points) and its JSON
+# does not fit in 8192 at all. See docs/failure-notes.md -- the remedy is at the
+# chunker, not here.
+MAX_TOKENS = 8192
+
+# Write results to disk every N chunks. The cache protects the API spend on a
+# crash; this protects the output file, which is otherwise only written once the
+# whole run finishes.
+FLUSH_EVERY = 25
 
 # Cohere list price for Command A, USD per token. Stated here so the cost
 # estimate is auditable -- check these against cohere.com/pricing.
@@ -398,8 +425,51 @@ def get_client() -> cohere.ClientV2:
     return cohere.ClientV2(api_key=api_key)
 
 
+# Transient failures worth waiting out. Deliberately does NOT include
+# BadRequest/Unauthorized/Forbidden/NotFound/UnprocessableEntity -- those are
+# permanent, and retrying them six times just delays a run that cannot succeed.
+RETRYABLE_ERRORS = (
+    cohere.errors.TooManyRequestsError,   # 429 -- the expected one across 1108 calls
+    cohere.errors.ServiceUnavailableError,  # 503
+    cohere.errors.InternalServerError,    # 500
+    cohere.errors.GatewayTimeoutError,    # 504
+    httpx.TransportError,                 # connect/read timeouts, protocol errors
+)
+
+# Transport-level retries, counted separately from the validation retry in
+# extract_chunk. They mean different things: this one is "the API was busy", the
+# other is "the model returned something that failed the schema".
+_transport_retries = 0
+
+
+def _note_retry(retry_state) -> None:
+    global _transport_retries
+    _transport_retries += 1
+    exc = retry_state.outcome.exception()
+    sleep = getattr(retry_state.next_action, "sleep", 0.0)
+    print(
+        f"\n    [transport retry {retry_state.attempt_number}] "
+        f"{type(exc).__name__} -- waiting {sleep:.1f}s",
+        end="",
+        flush=True,
+    )
+
+
+@retry(
+    retry=retry_if_exception_type(RETRYABLE_ERRORS),
+    wait=wait_exponential_jitter(initial=2, max=90),
+    stop=stop_after_attempt(6),
+    before_sleep=_note_retry,
+    reraise=True,
+)
 def call_model(client: cohere.ClientV2, messages: list[dict]) -> tuple[str, int, int, str]:
-    """One Command A call. Returns (text, input_tokens, output_tokens, finish_reason)."""
+    """One Command A call. Returns (text, input_tokens, output_tokens, finish_reason).
+
+    Retries transient API failures with exponential backoff + jitter. A 1108-call
+    sequential run will hit rate limits; without this the run dies and has to be
+    restarted by hand. The disk cache makes a restart free in API terms, but not
+    in wall-clock terms.
+    """
     res = client.chat(
         model=MODEL,
         messages=messages,
@@ -688,6 +758,8 @@ def report(stats: dict, extractions: list[Extraction], corpus_size: int) -> None
     print(f"api calls made          : {stats['api_calls']}")
     print(f"source_chunk_id repairs : {stats['source_id_repairs']}")
     print(f"truncated at max_tokens : {stats['truncated']}")
+    print(f"transport retries       : {_transport_retries}  (rate limits / 5xx)")
+    print(f"api errors (skipped)    : {stats['api_errors']}")
     print()
     print("INTEGRITY")
     print(f"dangling head/tail refs : {stats['dangling']}")
@@ -753,6 +825,7 @@ def main() -> None:
         "source_id_repairs": 0,
         "truncated": 0,
         "failures": [],
+        "api_errors": 0,
         "dangling": 0,
         "orphans": 0,
         "endpoint_violations": [],
@@ -760,9 +833,51 @@ def main() -> None:
     }
 
     extractions: list[Extraction] = []
+    touched = {c["chunk_id"] for c in selected}
+    EXTRACTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    def flush() -> None:
+        """Persist what we have. Called periodically and on the way out of any
+        exit path, so a crash at chunk 900 does not discard 899 chunks of work.
+        The disk cache already protects the API spend; this protects the output."""
+        write_jsonl(
+            EXTRACTIONS_PATH,
+            [json.loads(e.model_dump_json()) for e in extractions],
+            touched,
+        )
+        write_jsonl(FAILURES_PATH, stats["failures"], touched)
+
     for i, chunk in enumerate(selected, 1):
         print(f"[{i}/{len(selected)}] {chunk['chunk_id']} ... ", end="", flush=True)
-        extraction = extract_chunk(client, chunk, stats)
+
+        try:
+            extraction = extract_chunk(client, chunk, stats)
+        except KeyboardInterrupt:
+            print("\n\ninterrupted -- flushing completed work before exit")
+            flush()
+            raise
+        except ApiError as api_error:
+            # One chunk the API refuses must not end a 1108-chunk run. Record it
+            # like any other failure and keep going; a targeted re-run can pick it
+            # up later. Retrying here is pointless -- temperature=0 with a fixed
+            # seed makes the same request fail the same way.
+            body = getattr(api_error, "body", None)
+            kind = body.get("error_type") if isinstance(body, dict) else None
+            stats["failures"].append({
+                "chunk_id": chunk["chunk_id"],
+                "error": f"{type(api_error).__name__} "
+                         f"{getattr(api_error, 'status_code', '?')}: {kind or api_error}",
+                "stage": "api",
+            })
+            stats["api_errors"] += 1
+            print(f"API ERROR ({kind or type(api_error).__name__}) -- skipped")
+            if i % FLUSH_EVERY == 0:
+                flush()
+            continue
+
+        if i % FLUSH_EVERY == 0:
+            flush()
+
         if extraction is None:
             print("FAILED")
             continue
@@ -788,14 +903,7 @@ def main() -> None:
 
     # Merge into the existing files rather than truncating them: a targeted
     # re-run of a few chunk_ids must not delete the rows it didn't touch.
-    touched = {c["chunk_id"] for c in selected}
-    EXTRACTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    write_jsonl(
-        EXTRACTIONS_PATH,
-        [json.loads(e.model_dump_json()) for e in extractions],
-        touched,
-    )
-    write_jsonl(FAILURES_PATH, stats["failures"], touched)
+    flush()
 
     print(f"\nupserted {len(extractions)} extractions -> {EXTRACTIONS_PATH}")
     print(f"upserted {len(stats['failures'])} failures    -> {FAILURES_PATH}")

@@ -19,9 +19,8 @@ Update this file whenever the ontology or prompt changes materially. Nothing
 here is generated automatically; the numbers are copied from the cost report
 `extract.py` prints at the end of each run.
 
-Status: **ontology v3 validated on 28 chunks (pilot + representative sample), full
-corpus not yet run.** Current estimate **$23.13**; see Run 3 below, which supersedes
-the $16.66 figure in Run 1.
+Status: **full corpus extracted — 1107 of 1108 chunks (99.9%) under ontology v3.**
+Actual cost ≈ **$24** against a $23.13 estimate. See Run 4.
 
 ---
 
@@ -179,6 +178,110 @@ endpoint violation per 13 chunks, and 18 orphan entities.**
 `dangling_refs()`, which only ever looked for edges with no entity. Nothing looked
 for entities with no edge, and `aia-art99-para4` had nine cited Articles declared
 and unconnected while every check passed clean.
+
+---
+
+## Run 4 — the full corpus
+
+Took four attempts: one crash (an uncaught API error at chunk 215) and two
+external kills at chunks 906 and 1012. **No work was lost in any of them** — the
+disk cache preserved every paid call and, after the first crash, `flush()`
+preserved the output file. See `docs/failure-notes.md` for the RCA.
+
+| Metric | Value |
+|---|---|
+| Corpus chunks | 1108 |
+| **Extracted** | **1107 (99.9%)** |
+| **Validation failure rate** | **0.09%** (1 chunk) |
+| Entities | 7,466 |
+| Relationships | 6,767 |
+| Estimated cost | $23.13 |
+| **Actual cost** | **≈ $24** |
+| Avg tokens/chunk (final pass) | 5,598 in + 743 out |
+| `source_chunk_id` repairs | 32 |
+| Transport retries | 0 |
+
+The estimate held to within ~4%, which retroactively validates the Run 3b
+representative sample as the right basis. Zero transport retries: sequential
+extraction runs at ~10 calls/min, well under any rate limit.
+
+### Ontology v3 at full scale
+
+Every one of the 12 entity types and all 13 relationship types is used.
+
+| Entity type | Uses | Distinct names |
+|---|---|---|
+| Article | 1969 | 1164 |
+| Obligation | 1215 | **1141** |
+| DefinedTerm | 1189 | 542 |
+| ActorRole | 956 | **104** |
+| Authority | 872 | 97 |
+| SystemType | 334 | 73 |
+| Regulation | 219 | 74 |
+| Annex | 193 | 13 |
+| RiskCategory | 148 | **4** |
+| LawfulBasis | 145 | 136 |
+| Right | 104 | 68 |
+| Penalty | 12 | 11 |
+
+Three things to read off this table:
+
+- **`RiskCategory` is 4 distinct values across 148 uses.** Before v3 it was 6
+  values of which 5 were not risk categories. The junk-drawer problem is gone.
+- **`Obligation` is 94% unique** (1141 distinct of 1215). Obligations are phrased
+  per-chunk and barely repeat, so entity resolution has almost nothing to merge
+  there. The compressible types are `ActorRole` (956 → 104) and `Authority`
+  (872 → 97). Tune the Phase-1 resolution threshold on those.
+- **`bare self-articles: 0 of 1108`** — the v3 granularity rule held perfectly.
+  This was ~50/50 under v2 and is the single change most protective of the
+  `REFERENCES` backbone.
+
+Relationship counts: `APPLIES_TO` 2578, `IMPOSES` 1210, `REFERENCES` 1136,
+`DEFINED_IN` 514, `ENFORCED_BY` 383, `LISTED_IN` 191, `CLASSIFIED_AS` 171,
+`PERMITS` 137, `INTERACTS_WITH` 130, `GRANTS` 86, `EXEMPT_FROM` 58,
+`PENALIZED_UNDER` 19, `SETS_PENALTY` 12.
+
+`INTERACTS_WITH` at 130 resolves the worry raised in Run 3 — the cross-regulation
+bridge exists. `PENALIZED_UNDER` (19) and `SETS_PENALTY` (12) are thin because
+penalties genuinely live in few articles, but the `enforcement_chain` Cypher
+template depends on them, so confirm in Phase 1 Step 4 rather than assume.
+
+### Integrity at corpus scale
+
+| Check | Count | Rate |
+|---|---|---|
+| Dangling head/tail refs | 54 | 0.8% of edges |
+| Orphan entities (no edge) | 628 | 8.4% of entities |
+| Endpoint violations | 357 | 5.3% of edges |
+| Bare self-articles | 0 | 0% |
+| Type collisions (name under 2+ types) | 65 | — |
+
+All detected, none silently dropped. Run `python -m src.ingest.audit` to
+regenerate; re-run it after entity resolution to measure what actually merged.
+
+**The 65 type collisions are two distinct problems**, which matters because only
+one is already in the Step 3 design:
+
+- *Cross-type* — `AI system` is both `DefinedTerm` and `SystemType`; `Member State`
+  spans `ActorRole`, `Authority` and `DefinedTerm`. A side effect of adding
+  `DefinedTerm`: Art. 3 defines these terms, so the definition chunk types them one
+  way and every other chunk types them another. Needs deterministic retyping, which
+  the `entity_resolution.py` stub does not currently contemplate.
+- *Case variants* — `Commission`/`commission`, `Board`/`board`, `AI Office`/`ai office`.
+  This is `normalize()`'s job and already in scope.
+
+Confidence is now **10 distinct values spanning 0.6–0.96** (0.95 alone is 3346 of
+6767). Richer than the pilot's five, still ordinal, still not a probability.
+
+### The one chunk that did not extract
+
+`gdpr-art70-para1` — the corpus's largest at 864 tokens with 33 lettered
+sub-points (the EDPB task list). Its JSON exceeds Command A's **hard 8192-token
+output ceiling**, so it cannot be extracted in one call at any `max_tokens`
+setting. This is a chunking constraint surfacing at extraction; the remedy is to
+split oversized paragraphs at the chunker, as `rechunk_definitions.py` already
+does for definitions. Deferred because `chunk_id` is now load-bearing across both
+stores. The text remains in the vector path.
 
 ---
 
