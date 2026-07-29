@@ -246,7 +246,33 @@ off "full corpus not yet run."
 
 ---
 
-## Step 3 — Entity resolution (`src/ingest/entity_resolution.py`)
+## ~~Step 3 — Entity resolution~~ ✅ DONE — 3,485 → 3,366 nodes; ADR-0009
+
+> **Outcome.** Four deterministic stages (normalize → attested-plural folding → type reconciliation →
+> exact match) reduce **3,485 (type, name) nodes to 3,366**. Compression lands where it should:
+> **ActorRole −26%, Authority −15%, DefinedTerm −65 nodes**. Article and Obligation are ~70% of nodes
+> and neither is compressible, which is why the headline figure is only 3.4%.
+>
+> **The plan's design was missing a stage.** Resolution compares within a type, so the 66 cross-type
+> collisions were invisible to it. Type reconciliation had to run *after* case-folding: alone,
+> `Member State` → Authority and `member state` → ActorRole, so reconciling first would freeze one
+> concept into two permanently unmergeable types.
+>
+> **The threshold could not be tuned, because the classes do not separate.** 25 pairs hand-labelled
+> from the regulations: `supervisory authority`/`lead supervisory authority` (must not merge) scores
+> **0.753**, while `data protection officer`/`dpo` (must merge) scores **0.423**. Legal modifiers
+> create new entities; embeddings read them as synonyms. At 0.90 — **0 false merges, 7 of 10 missed**,
+> and every miss is a class a deterministic rule handles better.
+>
+> **The embedding pass over all 236 role-like nodes returned exactly one candidate, and it was a
+> false merge**: `real time remote biometric identification system` ~ `remote biometric
+> identification system` (0.914), which AIA Art. 5(1)(h) prohibits vs Annex III merely high-risk.
+> Embeddings are therefore **candidates-for-review only** (`--embed`), never auto-applied.
+>
+> Output: `data/processed/resolved-entities.json`. Alias-based merging left unapplied — 88 real
+> candidates, but the same list contains `law enforcement agency` ← `law enforcement purposes`.
+
+### ~~Original plan~~ (superseded by ADR-0009)
 
 The stub already fixes the design: normalize → exact match → Embed v4 cosine ≥
 `SIMILARITY_THRESHOLD` (0.90) → merge or create.
@@ -260,8 +286,7 @@ The stub already fixes the design: normalize → exact match → Embed v4 cosine
 - **Tune the threshold on ~30 hand-labeled pairs drawn from the Step 2 output**, not from
   imagination. Expect the roadmap's stated hard cases: `deployer` / `deployers` / `the deployer
   referred to in Article 26(1)`.
-- **Record the tuning result as an ADR.** This is the phase interviewers ask about, and `docs/adr/`
-  currently has no decision record for it.
+- **Record the tuning result as an ADR.**  `docs/adr/` currently has no decision record for it.
 
 ---
 

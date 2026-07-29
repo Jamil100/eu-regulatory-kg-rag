@@ -14,7 +14,10 @@ A change is marked `DONE` only if code in this repo enforces it.
   output truncation, not a modelling error.
 - Extraction edge-endpoint violation rate: **5.3%** of relationships (357 of 6767)
 - Orphan-entity rate: **8.4%** of entities (628 of 7466)
-- Entity-resolution false merges / misses: _TBD_
+- Entity-resolution false merges / misses: **0 false merges, 7 of 10 misses** at cosine 0.90,
+  on 25 adversarial hand-labelled pairs. The classes are **not linearly separable** — see
+  `docs/adr/adr-0009-entity-resolution.md`. Deterministic rules do the merging; the embedding
+  pass returned one candidate over the whole corpus and it was a false merge.
 - Router misclassification rate: _TBD_
 - Citation-validation rejection rate: _TBD_
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
@@ -428,8 +431,10 @@ trial limit never triggered a 429, because sequential extraction runs at ~10/min
 I had built retry logic for was not the limit that was going to stop me.**
 
 **What I changed.**
-- `DONE` — Production keys return *no* trial headers at all. That absence is now the check, and it
-  runs before the run rather than after the failure.
+- ~~`DONE`~~ → `OPEN` — I wrote here that "production keys return no trial headers, and that absence
+  is now the check." That was a check I ran **once, by hand**. No code enforces it. By this file's
+  own rule that is not `DONE`, and marking it so was the same false claim the ingestion section
+  opens with. It regressed within a day — see "Entity resolution", point 5.
 
 **What I learned.** Writing a risk down is not mitigating it. The check was in the plan in two
 places and neither made it into the sequence of commands I actually ran.
@@ -491,3 +496,174 @@ wrong; it just was not a checklist, and I treated it as prose.
 it stopped failing loudly enough to hide it.
 
 ---
+
+# Entity resolution: the sophisticated stage was the one that didn't work
+
+Final state: **3,485 → 3,366 nodes**, all of it done by deterministic rules. The Embed v4 stage the
+roadmap called "the hard part" produced one suggestion across the whole corpus, and acting on it
+would have been a legally false merge. Full decision record:
+`docs/adr/adr-0009-entity-resolution.md`.
+
+## 1. The design had no stage for the problem the data actually had
+
+**What happened.** The plan's pipeline was normalize → exact match → embedding similarity → merge.
+The audit had already found **66 names carrying more than one type** (`AI system` is both
+`DefinedTerm` and `SystemType`; `Member State` spans three). Resolution compares *within* a type.
+None of those 66 are reachable by any stage in that pipeline.
+
+**Why it mattered.** They are not near-misses a better threshold would catch — they are invisible.
+Every one would have entered Neo4j as two or three disconnected nodes for one concept, and every
+multi-hop query through them would have silently returned partial results.
+
+Most were self-inflicted: adding `DefinedTerm` in ADR-0008 fixed the `RiskCategory` junk drawer and
+created this. Art. 3 *defines* "AI system", so the definition chunk types it one way and the other
+1,100 chunks type it another.
+
+**What caught it.** The corpus audit, not the resolution code. `src/ingest/audit.py` counts names
+carrying more than one type because the extraction pass needed that number; entity resolution
+inherited a problem already sitting in a report.
+
+**What I changed.**
+- `DONE` — A type-reconciliation stage: pooled majority vote per normalized name, logged with the
+  vote and the rule that settled each one. 64 names reconciled.
+
+**What I learned.** A fix at one layer becomes an input problem at the next. `DefinedTerm` was
+correct and I still owe the graph a stage that did not exist before I added it.
+
+## 2. Stage order decided the answer, and I nearly got it backwards
+
+Taken on its own, `Member State` resolves to `Authority` (14 `DefinedTerm`, 5 `Authority`,
+1 `ActorRole`). `member state` resolves to `ActorRole` (67, 3, 1). **Same concept, two types, purely
+because of capitalisation.**
+
+Reconciling types before case-folding would have frozen that split permanently — and it would have
+looked fine, because each decision is individually defensible against its own vote.
+
+Caught by checking the two forms against each other before writing the pipeline, rather than after.
+Pooling the votes after the fold gives `ActorRole` for both.
+
+- `DONE` — Case-fold runs first; the ordering constraint is written into the module docstring, since
+  nothing in the code makes it obvious that swapping two stages changes the output.
+
+## 3. A rule that was right in principle overrode 18 votes with 1
+
+**What happened.** `DefinedTerm` is the ontology's designated catch-all, so "a specific type beats
+the catch-all" is a principled rule. Applied literally it produced:
+
+```
+international organisation   {DefinedTerm: 18, ActorRole: 1, Authority: 1}  ->  Authority
+```
+
+Drop the catch-all, and what remains is a 1-1 tie broken by type priority. Eighteen votes discarded
+to settle an argument between two. "International organisation" is a defined term in GDPR
+Art. 4(26); it is not an authority.
+
+**What caught it.** The decision log. I had made `reconcile_types` record every reconciled name with
+its vote *and the rule that fired*, for explainability — and that column is what made a wrong answer
+legible. The winner alone (`Authority`) looks unremarkable next to `advisory forum` and
+`certification body`; `[catch-all dropped + tie -> priority]` next to an 18-vote majority does not.
+
+**What I changed.**
+- `DONE` — The catch-all only loses to a type the corpus actually attests: it survives when it holds
+  an outright majority. That correctly keeps `systemic risk`, `adequacy decision`, `appropriate
+  safeguards`, `post-market monitoring system` and `law enforcement purpose` as defined terms.
+
+**What I learned.** A rule can be sound and still be wrong at the tails. "Specific beats generic" is
+right when the specific type is *attested*; it is noise amplification when it is one stray mention.
+I would not have found this by reasoning about the rule — only by printing what it decided.
+
+## 4. The threshold could not be tuned, because the classes do not separate
+
+The roadmap says: tune the cosine threshold on ~30 hand-labelled pairs, starting at 0.90. I built 25
+pairs from the regulations themselves — the AI Act and GDPR define these terms, so the labels are
+citations, not opinions. The result:
+
+| | pair | cos |
+|---|---|---|
+| **must NOT merge** | `supervisory authority` / `lead supervisory authority` (GDPR Art. 56) | **0.753** |
+| **must merge** | `data protection officer` / `dpo` | **0.423** |
+
+The classes overlap by 0.33. **No threshold exists.** Two structural reasons:
+
+- **Legal modifiers create new entities and embeddings read them as synonyms.** "lead",
+  "prospective", "downstream", "joint", "notifying" each define a separate role. Compositional
+  similarity is exactly wrong here.
+- **Embeddings are hopeless at abbreviations.** `dpo`/`data protection officer` scores below every
+  must-not-merge pair in the set.
+
+At 0.90 the measured result is **0 false merges of 15, 7 misses of 10** — and every miss belongs to a
+class a deterministic rule handles better and cheaper (hyphens, plurals, abbreviations).
+
+**What I changed.**
+- `DONE` — Hyphen folding in `normalize()` (`law-enforcement authority` was the highest-scoring pair
+  in the whole set at 0.966 — no reason to pay an API call for a character class).
+- `DONE` — Plural folding that only merges when **both forms are attested in the corpus**. Blind
+  `s`-stripping breaks `premises`, `analysis`, `business`.
+- `DONE` — `SIMILARITY_THRESHOLD` stays 0.90, the measured zero-false-merge point, and the embedding
+  pass emits **candidates for review, never automatic merges**.
+
+## 5. The one thing embeddings suggested was a false merge
+
+Run at 0.90 over all 236 role-like nodes, the embedding pass returned exactly one pair:
+
+```
+0.9137  real time remote biometric identification system ~ remote biometric identification system
+```
+
+AIA Art. 5(1)(h) **prohibits** real-time remote biometric identification in publicly accessible
+spaces for law enforcement. Post-remote RBI is high-risk under Annex III — permitted with
+obligations. Art. 3 defines the two separately. Merging them collapses a prohibition into a
+permission: the ADR-0007 failure again, arriving through the resolution stage instead of the
+ontology.
+
+**What I learned.** The roadmap calls entity resolution "the hard part" and budgets the expensive
+model for it. On a corpus of *defined* legal terms the hard part is knowing when **not** to merge,
+and that is a job for rules with citations behind them. I was ready to tune a threshold; the useful
+work was proving a threshold could not exist.
+
+## 6. My own key check regressed inside a day
+
+**What happened.** The previous section records `DONE` for "production keys return no trial headers,
+and that absence is now the check." Halfway through this stage an embed call came back carrying
+`x-endpoint-monthly-call-limit: 1000`.
+
+The key had changed underneath me. The production key was `CO_API_KEY` (53 chars) set in the shell
+environment; only `COHERE_API_KEY` (40 chars, trial) is in `.env`. `get_client()` reads
+`os.getenv("CO_API_KEY") or os.getenv("COHERE_API_KEY")`, so when the environment variable stopped
+being present, **it silently downgraded to the trial key and kept working.**
+
+**Why it mattered.** Not much this time — extraction had already completed under the production key,
+and the embedding work needs three calls. But the failure mode is: a long run starts, quietly uses a
+1,000-call/month key, and dies partway with a limit error that looks like a new problem. Which is
+exactly what happened the first time, one section above.
+
+**What caught it.** Reading response headers on an unrelated 400 error. Nothing was watching.
+
+**What I changed.**
+- `OPEN` — `get_client()` should report which variable it resolved and refuse to start a `--all` run
+  on a key that returns trial headers. The `or` fallback is a silent downgrade between two things
+  with very different limits. Not built.
+
+**What I learned.** I marked a manual check `DONE` and it regressed before the next stage finished.
+A verification that is not in the code is not a verification, it is a memory — and this file has now
+caught me making that exact mistake twice, in consecutive sections.
+
+**Known limitation, left in place deliberately.** Alias-based merging is not applied. 53% of mentions
+carry extractor aliases and 88 alias→canonical pairs are real merges — including `the board` →
+`european artificial intelligence board`, correct per AIA Art. 65. The same list also yields
+`law enforcement agency` ← `law enforcement purposes`, which is nonsense. Candidate-quality, not
+merge-quality, and the whole lesson of this stage is not to auto-apply that.
+
+## What I learned
+
+**The cheap stage did the work and the expensive stage did none of it.** Deterministic rules merged
+119 nodes; Embed v4 proposed one merge and it was wrong. The roadmap's cost intuition was inverted
+for this corpus, and only measuring showed it.
+
+**Explainability caught a bug that correctness checks would not have.** The decision log was built to
+make the graph traceable. It found a wrong rule instead. Every reconciled name still looked plausible
+in the output; only the *reason* was visibly absurd.
+
+**Two of the six items here are recurrences.** The false merge is ADR-0007's prohibition/permission
+collapse arriving through a different stage; the key check is the same false `DONE` this file called
+out in the ingestion section. The failure modes are not being retired, they are changing address.
