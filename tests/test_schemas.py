@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from src.ingest.extract import ALLOWED_ENDPOINTS, endpoint_violations, orphan_entities
 from src.schemas import Entity, Extraction, Relationship
 
 
@@ -63,3 +64,95 @@ def test_extraction_requires_chunk_id():
 def test_extraction_round_trips():
     x = Extraction(chunk_id="gdpr-art6-para1", entities=[], relationships=[])
     assert x.chunk_id == "gdpr-art6-para1"
+
+
+# --------------------------------------------------------------------------
+# Ontology v3: DefinedTerm / Right / Penalty + GRANTS / SETS_PENALTY
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entity_type", ["DefinedTerm", "Right", "Penalty"])
+def test_entity_accepts_v3_types(entity_type):
+    assert Entity(type=entity_type, canonical_name="x").type == entity_type
+
+
+@pytest.mark.parametrize("relation_type", ["GRANTS", "SETS_PENALTY"])
+def test_relationship_accepts_v3_types(relation_type):
+    r = Relationship(
+        type=relation_type, head="a", tail="b", source_chunk_id="x", confidence=0.9
+    )
+    assert r.type == relation_type
+
+
+def test_every_relation_type_has_an_endpoint_rule():
+    """A relation with no entry in ALLOWED_ENDPOINTS is silently unchecked --
+    exactly the gap that let ENFORCED_BY point at a Regulation."""
+    from typing import get_args
+
+    from src.ingest.extract import RelationType
+
+    assert set(get_args(RelationType)) == set(ALLOWED_ENDPOINTS)
+
+
+# --------------------------------------------------------------------------
+# Post-parse integrity checks. Pydantic validates the type *string* only, so
+# these cover the semantic errors it structurally cannot see.
+# --------------------------------------------------------------------------
+
+
+def _extraction(entities, relationships):
+    return Extraction(
+        chunk_id="c1",
+        entities=[Entity(type=t, canonical_name=n) for t, n in entities],
+        relationships=[
+            Relationship(type=t, head=h, tail=tl, source_chunk_id="c1", confidence=0.9)
+            for t, h, tl in relationships
+        ],
+    )
+
+
+def test_endpoint_violation_caught_for_enforced_by_regulation():
+    """The real bug from the pre-flight probe: ENFORCED_BY pointed at a
+    Regulation instead of an Authority, and passed validation clean."""
+    x = _extraction(
+        [("Obligation", "comply"), ("Regulation", "AIA")],
+        [("ENFORCED_BY", "comply", "AIA")],
+    )
+    assert x.relationships  # schema-valid ...
+    violations = endpoint_violations(x)
+    assert len(violations) == 1 and "tail=Regulation" in violations[0]
+
+
+def test_endpoint_violation_caught_for_article_headed_exempt_from():
+    """'other than those laid down in Article 5' produced
+    EXEMPT_FROM: AIA Art. 5 -> AIA Art. 99, asserting a false exemption."""
+    x = _extraction(
+        [("Article", "AIA Art. 5"), ("Article", "AIA Art. 99(4)")],
+        [("EXEMPT_FROM", "AIA Art. 5", "AIA Art. 99(4)")],
+    )
+    assert "head=Article" in endpoint_violations(x)[0]
+
+
+def test_valid_penalty_chain_has_no_violations():
+    x = _extraction(
+        [
+            ("Article", "AIA Art. 99(4)"),
+            ("Obligation", "comply with provider obligations"),
+            ("Penalty", "administrative fine up to EUR 15 000 000 or 3 %"),
+        ],
+        [
+            ("SETS_PENALTY", "AIA Art. 99(4)", "administrative fine up to EUR 15 000 000 or 3 %"),
+            ("PENALIZED_UNDER", "comply with provider obligations", "AIA Art. 99(4)"),
+        ],
+    )
+    assert endpoint_violations(x) == []
+
+
+def test_orphan_entities_found():
+    """dangling_refs looks for edges with no entity; this is the mirror image.
+    Nine cited Articles were declared and left unconnected in aia-art99-para4."""
+    x = _extraction(
+        [("Article", "AIA Art. 99(4)"), ("Article", "AIA Art. 16"), ("Obligation", "comply")],
+        [("IMPOSES", "AIA Art. 99(4)", "comply")],
+    )
+    assert orphan_entities(x) == ["AIA Art. 16"]

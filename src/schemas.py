@@ -1,6 +1,6 @@
 """Shared Pydantic models: ontology-constrained extraction + API contracts.
 
-The ontology (9 entity types, 11 relationship types) is defined once in
+The ontology (12 entity types, 13 relationship types) is defined once in
 src/ingest/extract.py and re-exported here, so there is a single source of
 truth. Import Entity/Relationship/Extraction from either module.
 """

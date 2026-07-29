@@ -266,3 +266,117 @@ looking at and assumed it covered the whole; here I confirmed the *shape* of the
 assumed it covered the meaning. Same shortcut, one level up.
 
 ---
+
+# Extraction, second pass: the same hole, twice more, found on purpose this time
+
+Two pre-flight probes before paying for the full corpus. Both found things. Full decision record:
+`docs/adr/adr-0008-definedterm-right-penalty.md`.
+
+The probes existed because of one property of the code: `cache_key()` hashes the system prompt, so
+an ontology fix found *after* the full run invalidates all 1,108 cached responses and costs a
+second full run. That turns "read the output before paying" from good practice into arithmetic —
+$0.28 of probes against a $23 purchase that is awkward to redo.
+
+## 1. `RiskCategory` had quietly become the junk drawer
+
+**What happened.** Of six distinct `RiskCategory` values across the stored chunks, exactly one —
+`high-risk` — was a risk category. The others were `biometric data`, `special categories of
+personal data`, `specific categories of personal data`, and `making available on the market`.
+
+The ontology had no type for a term of art, so every definiendum landed in the nearest wrong slot.
+And the system prompt's **own Example 2 taught it**, typing `biometric data` as `RiskCategory`. The
+bad example had been sitting in the prompt since v1, teaching the mistake on every call.
+
+**Why it mattered.** AIA Art. 3 is 94 definition chunks. Left alone, a large fraction of the corpus
+would have been mistyped, and the `RiskCategory` label would have meant nothing — "what is
+high-risk?" would have answered "making available on the market".
+
+**What caught it.** Aggregating the *distinct values* of one entity type across all stored rows,
+rather than reading extractions chunk by chunk. Every individual extraction looked fine. The type
+histogram in the metrics doc had said `RiskCategory: 8` for weeks and nobody asked which eight.
+
+## 2. The same right, modelled two different ways, one paragraph apart
+
+`gdpr-art21-para2` produced `Obligation: allow data subjects to object` + `IMPOSES`.
+`gdpr-art21-para5` produced `LawfulBasis: right to object by automated means` + `PERMITS`.
+
+Same right. Two types. Entity resolution compares within a type, so it could never have merged
+them — the fragmentation would have been permanent and invisible.
+
+**Why it mattered.** GDPR Chapter III is *entirely* data-subject rights, roughly 80 chunks. There
+was no `Right` type, so every one of them would have been split across `Obligation` and
+`LawfulBasis` according to phrasing.
+
+**What caught it.** The random sample happening to draw two paragraphs of the same article. A
+sample stratified by article would have drawn one and seen nothing wrong.
+
+## 3. Two false facts that passed every check
+
+```
+EXEMPT_FROM  AIA Art. 5 -> AIA Art. 99   (0.90)
+ENFORCED_BY  take necessary steps ... -> AIA   (tail is a Regulation, not an Authority)
+```
+
+The first says the AI Act's most severely punished provision is exempt from penalties. The source
+says "other than those laid down in Articles 5", which routes Art. 5 breaches to a *higher* tier
+(Art. 99(3), EUR 35 000 000 / 7 %).
+
+`Literal` validates the type *string*. It has no way to see that an edge's ends are the wrong kind
+of thing. Both were schema-valid.
+
+**What I changed.**
+- `DONE` — `ALLOWED_ENDPOINTS` in `src/ingest/extract.py` declares head/tail types for all 13
+  relationships; `endpoint_violations()` checks every edge after parsing and the count is printed
+  in the run report. Covered by `tests/test_schemas.py`, including both real errors above as
+  regression cases.
+- `DONE` — Violations are **counted and printed, never dropped.** A dropped edge is
+  indistinguishable from one that was never extracted, which is precisely how the v1 ontology hole
+  stayed hidden. Detection beats silent repair.
+- `DONE` — `orphan_entities()`, the mirror of `dangling_refs()`. `aia-art99-para4` declared nine
+  cited Articles and connected none of them; `dangling_refs()` looks only for edges with no entity,
+  so it passed clean and reported nothing.
+
+## 4. Article names were sub-numbered about half the time
+
+`GDPR Art. 21(2)` and `Art. 49(5)` came out correct; `Art. 13`, `Art. 65` and `AIA Art. 99` came
+out bare — same construct, opposite behaviour, roughly 50/50. Bare and sub-numbered names become
+two nodes, which severs every cross-reference into that paragraph, and `REFERENCES` is the
+cross-reference backbone the whole graph path depends on.
+
+The paragraph number was in the chunk metadata the entire time, passed to the model in the header
+and unused.
+
+**What I changed.**
+- `DONE` — An explicit normalisation rule pins the chunk's own article to its paragraph or
+  definition number, and both worked examples were corrected to match. Measured after: **0 bare
+  self-article names across 27 chunks**, from ~50%.
+- `DONE` — `granularity_miss()` reports the rate every run, so a regression shows up as a number
+  rather than as a quietly fragmenting graph.
+
+## What I learned
+
+**A bad few-shot example is worse than no example.** Example 2 taught `biometric data` as a
+`RiskCategory` on every single call. Prompt examples are training data with none of the review that
+training data gets.
+
+**Aggregate the values, not just the counts.** `RiskCategory: 8` looked healthy in the metrics
+table. `RiskCategory: {high-risk, biometric data, making available on the market, ...}` was
+obviously broken on sight. Same data, one `Counter` apart — and the healthy-looking version had
+been sitting in the doc for weeks.
+
+**Two samples of the same thing beat two samples of different things.** The rights bug was only
+visible because the draw happened to include two paragraphs of Article 21. Consistency failures are
+invisible to any sample that touches each construct once, and "cover everything once" is exactly
+what a well-designed sample usually optimises for.
+
+**A schema that constrains types does not constrain meaning.** `Literal` made invented types
+impossible and false statements easy. Every wrong edge here was schema-valid; three passes of
+Pydantic validation reported 0% failure while asserting that Article 5 carries no penalty.
+
+**The pattern is now three-for-three.** Missing `LawfulBasis` produced phantom obligations. Missing
+`DefinedTerm` produced phantom risk categories. Missing `Right` produced both, inconsistently.
+Every time, the ontology hole showed up as fluent, confident, well-formed wrong output — never as
+an error, never as a gap, never as low confidence. **Design ontologies by opposites** was the
+lesson from ADR-0007 and it was right; I just did not run it a second time after adding `PERMITS`.
+
+---

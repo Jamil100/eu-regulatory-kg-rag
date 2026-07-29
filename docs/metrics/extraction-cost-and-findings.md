@@ -19,7 +19,9 @@ Update this file whenever the ontology or prompt changes materially. Nothing
 here is generated automatically; the numbers are copied from the cost report
 `extract.py` prints at the end of each run.
 
-Status: **extraction validated on 10 chunks, full corpus not yet run.**
+Status: **ontology v3 validated on 28 chunks (pilot + representative sample), full
+corpus not yet run.** Current estimate **$23.13**; see Run 3 below, which supersedes
+the $16.66 figure in Run 1.
 
 ---
 
@@ -97,7 +99,93 @@ Pydantic validation, was re-sent with the validation error appended, and passed.
 
 ---
 
-## Current extraction quality (all 10 stored rows)
+## Run 3 — pre-flight probes, and ontology v3
+
+Two probes before committing to the full run, on the reasoning that `cache_key()`
+hashes the system prompt: any ontology fix discovered *after* the full run
+invalidates all 1,108 cached responses and costs a second full run. Probes cost
+~$0.28 total; the insurance is on a ~$15–23 purchase.
+
+### 3a — penalty probe (3 chunks, ontology v2)
+
+`aia-art99-para1`, `aia-art99-para4`, `gdpr-art83-para5`. Purpose: exercise
+`PENALIZED_UNDER`, flagged in Run 1 as the one relationship type with zero uses.
+
+**It fired** — 7 edges on the AIA chunk, 6 on the GDPR chunk, correctly typed
+`Obligation → Article`. The type is no longer untested. Reading the rest of the
+output found four problems; see ADR-0008.
+
+Cost $0.0739 for 3 chunks ($0.0246/chunk). **Do not read a corpus estimate off
+this run** — penalty provisions are list-dense, so output ran 1,586 tok/chunk
+against the pilot's 813. Its $27.28 projection is a worst case.
+
+### 3b — representative sample (15 chunks, ontology v2)
+
+Seeded random draw (seed 42), proportional across both regulations, excluding
+already-extracted chunks. **Sample mean 65 tokens vs corpus mean 72 — a ratio of
+0.91**, against the existing pilot's 2.08. This is the first honest per-chunk
+figure; Run 1's sample bias caveat is now resolved rather than merely noted.
+
+| Metric | Value |
+|---|---|
+| Chunks processed | 15 |
+| Succeeded / failed | 15 / 0 (0.0%) |
+| Retries | 1 (6.7% — the pilot's 0% was optimistic) |
+| Avg tokens/chunk | 3,420 in + 448 out |
+| Cost per chunk | $0.0130 |
+| **Estimated full corpus (v2 ontology)** | **$14.43** |
+
+Quality on short text was the open worry and it held up: a 27-token chunk yielded
+3 entities and 2 relationships, not an over-extracted blob. No evidence that Rule 1
+("extract only what THIS chunk states") breaks down as chunks get shorter.
+
+### 3c — re-run under ontology v3
+
+Both probes were re-run after the ADR-0008 changes, since editing the prompt
+invalidates the cache anyway. 28 chunks now stored.
+
+| | v2 | v3 |
+|---|---|---|
+| Avg input tokens/chunk | 3,420 | 5,463 |
+| Avg output tokens/chunk | 448 | 722 |
+| Cost per chunk | $0.0130 | $0.0209 |
+| **Estimated full corpus** | **$14.43** | **$23.13** |
+
+The +60% buys the quality changes tabulated in ADR-0008 — `RiskCategory` mistyping
+eliminated, rights consistently typed, penalty amounts captured, false exemptions
+gone, article granularity at 100%, `REFERENCES` density up 4×.
+
+**Where the money goes now.** Input is 65% of the run ($15.13 of $23.13) and ~96%
+of input is the fixed system prompt, resent 1,108 times. Two levers could touch
+that, and **neither is available**:
+
+- *Prompt caching* — does not exist for Command A on Cohere's API. Checked and
+  closed; see Open questions below.
+- *Batching several chunks per call* — would amortise the prompt and roughly halve
+  the run, and is declined on purpose: it muddies `source_chunk_id`, which citation
+  validation depends on. **Attribution integrity was chosen over roughly half the
+  run cost.**
+
+So the $15.13 of input is structural. The only remaining lever is the length of the
+system prompt itself, and the few-shot examples are 47% of it.
+
+### New integrity checks
+
+`extract.py` now reports four things per run that nothing measured before. On the
+v3 re-run across 27 chunks: **0 dangling refs, 0 bare self-article names, ~1
+endpoint violation per 13 chunks, and 18 orphan entities.**
+
+`orphan_entities()` is the one that matters most — it is the mirror of
+`dangling_refs()`, which only ever looked for edges with no entity. Nothing looked
+for entities with no edge, and `aia-art99-para4` had nine cited Articles declared
+and unconnected while every check passed clean.
+
+---
+
+## Extraction quality (first 10 stored rows, ontology v1/v2)
+
+Superseded by Run 3 for cost purposes; retained because the type distribution and
+integrity findings below are what motivated ontology v2.
 
 85 entities, 89 relationships. 6 rows are v1 output, 4 are v2.
 
@@ -242,14 +330,44 @@ across regulations, so the namespacing is load-bearing, not cosmetic.
 
 - **Is $2.50/$10.00 per 1M still current Command A pricing?** Everything above
   depends on it.
-- **Prompt caching** — ~87% of input tokens are a constant system prompt. Worth
-  checking whether Cohere supports caching it for Command A.
-- **`PENALIZED_UNDER` is untested.** Add a penalty provision to the sample.
+- **Is the v3 prompt worth its length?** It grew ~2,040 tokens for the ontology v3
+  additions. The five few-shot examples are ~2,530 tokens — **47% of the system
+  prompt and $7.01 of the run** — with Example 5 alone at ~940 tokens / $2.60.
+  Trimming the examples is now the *only* lever on input cost (see closed question
+  below), and it is a weak one: a realistic trim saves ~$2.25, and every problem
+  Step 0 found was caused by the prompt saying too little, not too much.
+- **Penalty handling is inconsistent between regulations.** `aia-art99-para4` emits
+  7 `PENALIZED_UNDER` plus `SETS_PENALTY`; `gdpr-art83-para5` emits `SETS_PENALTY`
+  but zero `PENALIZED_UNDER`, having produced 6 under v2. Needs one more look.
 - **Confidence is coarse.** Decide whether five discrete values are enough to
   filter on before relying on it in retrieval.
 - **Disjunction is unmodelled** (see finding 2).
-- **Sample bias** — the 10 chunks are deliberately hard. A random 10 would give a
-  more honest cost-per-chunk, at the cost of one more paid run.
+- **`INTERACTS_WITH` is sparse** — 3 edges across 28 chunks. It is the
+  cross-regulation bridge every Phase 5 cross-reg question traverses. Count it
+  corpus-wide in the post-run audit before assuming the bridge exists.
+
+**Closed by Run 3:** `PENALIZED_UNDER` untested (3a); sample bias in the
+cost-per-chunk figure (3b).
+
+**Closed — prompt caching is not available.** Command A does not support prompt
+caching on Cohere's API, checked 2026-07-29:
+
+- no `cache_control`-style parameter in the v2 Chat API;
+- no cached-token line in Cohere's pricing — the billing model is input/output
+  tokens only, and the `billed_units` distinction covers tokens Cohere adds under
+  the hood, not caching;
+- nothing in the changelog through the Command A+ release (May 2026).
+
+This matters more than a normal closed question: ~96% of input tokens are the same
+system prompt sent 1,108 times, and input is 65% of the run. **That $15.13 is
+structurally unavoidable on this architecture.** The two levers that would have
+touched it are both gone — caching does not exist, and batching was declined on
+attribution-integrity grounds (see Run 3c). What remains is trimming the few-shot
+examples, worth ~$2.25 realistically.
+
+Worth restating plainly in the README's cost section: the honest framing is not
+"we optimised extraction cost" but "we measured it, found the one big lever
+unavailable and the other unacceptable, and paid the $23."
 
 ---
 
