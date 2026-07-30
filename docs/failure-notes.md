@@ -18,6 +18,15 @@ A change is marked `DONE` only if code in this repo enforces it.
   on 25 adversarial hand-labelled pairs. The classes are **not linearly separable** — see
   `docs/adr/adr-0009-entity-resolution.md`. Deterministic rules do the merging; the embedding
   pass returned one candidate over the whole corpus and it was a false merge.
+- Graph load: **3,366 nodes / 6,658 relationships** in Neo4j from 1,107 chunks. Edges skipped
+  as dangling **107 (1.6%)**; loaded but tagged as endpoint-violating **241 (3.6%)**; isolated
+  nodes **112 (3.3%)**. Re-running the loader is a verified no-op
+  (`tests/test_graph_writer.py::test_loading_twice_is_a_no_op`).
+- Cypher templates broken on first contact with a real graph: **3 of 6** — one returned zero rows,
+  one was a cartesian product, one silently missed 48 of 337 defined terms. Plus **1** row-count
+  defect from parallel edges (24,428 rows where 169 were correct).
+- Graph load wall-clock: **2.7–3.1s warm, 9.4s cold** (3,366 nodes + 6,658 edges; the graph write is
+  1.7s of that, the rest is Neo4j JVM/plan-cache warmup). See `docs/metrics/graph-load.md`.
 - Router misclassification rate: _TBD_
 - Citation-validation rejection rate: _TBD_
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
@@ -667,3 +676,97 @@ in the output; only the *reason* was visibly absurd.
 **Two of the six items here are recurrences.** The false merge is ADR-0007's prohibition/permission
 collapse arriving through a different stage; the key check is the same false `DONE` this file called
 out in the ingestion section. The failure modes are not being retired, they are changing address.
+---
+
+# Graph load (Step 4): two Cypher templates written against a graph nobody had loaded
+
+**What happened.** The six templates in `src/query/cypher_templates.py` were written during
+scaffolding, months before a graph existed. Before loading, I simulated all six in Python against the
+resolved entities and edges. Two were broken.
+
+`cross_regulation` required `(:Article)-[:INTERACTS_WITH]-(:Article)` and returned **zero rows**. All
+130 `INTERACTS_WITH` edges point at the *instrument*: `Article→Regulation` 108, `Annex→Regulation` 11,
+`Regulation→Regulation` 10, `Right→Regulation` 1. The AI Act ↔ GDPR bridge was there; the template was
+asserting a shape the corpus never produced.
+
+`obligations_for_system` had a second, unconnected `MATCH (a:Article)-[:IMPOSES]->(o:Obligation)` — a
+cartesian product crossing the matched system with all 1,219 `IMPOSES` edges.
+
+**Why it mattered.** These are the cross-regulation and risk-classification questions — the two the
+graph path exists to showcase. `cross_regulation` would have failed silently as "no results found,"
+which reads as a corpus gap rather than a query bug. And `obligations_for_system` **returned rows**,
+which is exactly why it survived being written: nobody counts 1,219 rows to check they are the right
+ones.
+
+**What caught it.** Simulating the templates before loading, prompted by the Step 4 note *"a template
+returning zero rows means the graph shape does not match what Phase 3 assumes — you want to know that
+now, not in week 3."* Not a test, not the loader — reading the query against the data.
+
+Two related things the metrics doc could not have caught:
+
+- **`INTERACTS_WITH` at 130 looked like the check passing.** Run 3 flagged it as sparse (3 edges) and
+  said to count it corpus-wide before assuming the bridge exists. The count came back healthy and the
+  worry was closed — but the count was never the risk. The *endpoint types* were, and no histogram in
+  the metrics doc records an endpoint type.
+- **A third defect only appeared once loaded.** Edges are stored one per asserting chunk, so
+  `high risk ai system -[:CLASSIFIED_AS]-> high risk` is **124 parallel edges**. That inflated
+  `obligations_for_system` from 169 rows to **24,428**. The simulation used Python sets and so could
+  not see it; the fix is `RETURN DISTINCT` on every node projection.
+
+**A third defect, found by chasing a discrepancy rather than by a test.** After loading, my simulation
+said `definition_of` covered 337 terms and the live graph said 286. The 51-term gap was the template:
+its tail was pinned to `(a:Article)`, but `DEFINED_IN`'s endpoint contract is Article **or** Annex, and
+**48 terms are defined only in an Annex** (AIA Annex IV defines `computational resources`, Annex VIII
+defines `status of the ai system`; the other 3 are endpoint violations). Those terms returned zero rows.
+
+**This one had already passed a non-empty test.** The probe parameter was `provider`, which happens to
+be defined in an Article. A template can be 86% correct and look perfectly healthy — and the only
+reason this surfaced is that two numbers which should have matched didn't, and the gap was worth
+chasing rather than rounding off. Fixed to `(a:Article|Annex)`, with an annex-defined term added to the
+parametrized template cases so the probe set can no longer be accidentally unrepresentative.
+
+**What I changed.**
+- `cross_regulation` matches `:Entity` on both ends; `obligations_for_system` hangs its obligation leg
+  off the system as an `OPTIONAL MATCH`; `definition_of` accepts `:Article|Annex`. `DONE`.
+- `RETURN DISTINCT` on all five node-projecting templates, with the reason in the module docstring.
+  `DONE`.
+- All six templates are now asserted non-empty against the live graph in
+  `tests/test_graph_writer.py`, plus an exact-row-count assertion (169) that would fail if `DISTINCT`
+  were ever dropped. `DONE`.
+- A shared `:Entity` label on every node, so the previously label-free matches in `definition_of` and
+  `path_between` hit an index instead of scanning. `DONE`.
+
+**Loader policies, decided in writing rather than by accident** (`src/ingest/graph_writer.py`):
+241 endpoint violations load **tagged** `endpoint_violation: true`; 107 dangling edges are **skipped**
+and listed in `data/processed/graph-load-report.json`; 112 isolated nodes **load**. The first follows
+this repo's existing rule that a dropped edge is indistinguishable from one never extracted. The
+second is the exception, and for a specific reason: an undeclared endpoint has no type, therefore no
+label, and an untyped node would give the unlabeled `path_between` shortest paths through nodes that
+do not really exist.
+
+**`OPEN`: the templates return nodes, never relationships.** `source_chunk_id` is on every edge and is
+the join key to pgvector, but no template projects it, so citation validation currently has no way to
+say which paragraph asserted an edge it used. Phase 3 needs to fix this and it is not a one-line
+change.
+
+**`OPEN`: `gdpr-art70-para1` still has no edges in the graph.** The 864-token EDPB task-list paragraph
+never extracted, so "which authority does what" has no graph path. Already recorded above as a
+chunking problem; the graph now makes the consequence concrete.
+
+**What I learned.** **A count is not a shape.** Every number I had about `INTERACTS_WITH` was healthy —
+130 edges, spanning 146 distinct nodes, up 43× from the probe. The one fact that mattered, that not a
+single one of them ends at an Article, was not in any table I had built, because I had been auditing
+*how much* was extracted and never *what it connects to*. The Step 0 lesson was "read the output, not
+the aggregate"; this is the same lesson one level up — read the output *against the query that will
+consume it*.
+
+And **the failures got quieter as they got worse.** `cross_regulation` returned zero rows and announced
+itself. The cartesian product returned 1,219 wrong rows and looked like a working query — caught only
+because the number was too large to be plausible. `definition_of` returned *correct* rows for 86% of
+terms and nothing at all for the rest, which no non-empty assertion can detect and no implausible
+number betrays. The only thing that caught the quietest one was two counts that should have agreed and
+didn't.
+
+**Consequence for how I test queries:** "returns rows" is a smoke test, not a check. What actually
+found things here was comparing a query's coverage against the edges that ought to satisfy it — so the
+template tests now assert coverage (334 defined terms reachable, 169 exact rows), not just non-emptiness.

@@ -132,3 +132,45 @@ and the deterministic rules carry it.
   safely.
 - **False-merge/miss rates are measured on 25 adversarial hand-labelled pairs, not a random sample.**
   The pairs were chosen to be hard, so 0 false merges at 0.90 is a strong signal but not a rate.
+
+---
+
+## Correction (2026-07-30, during Step 4) — `normalize()` mangled sub-numbered article keys
+
+`normalize()` ended with `.strip(" .,;:()[]")`, which stripped a closing paren regardless of whether
+it had a partner. Every sub-numbered article key lost it: `AIA Art. 1(1)` resolved to
+**`aia art. 1(1`**, and **1,026 of the 3,366 nodes carried an unbalanced paren.**
+
+This was invisible to every check in this ADR because it is not a *merge* error. Resolution grouped
+exactly the right names; it just gave the group a damaged key. It surfaced only when the Cypher
+templates were read against the resolved data during Step 4 — every template matches
+`{canonical_name: $param}`, so the query side and the Phase-3 entity linker would have had to
+reproduce the mangled form forever.
+
+**Fixed** by peeling a bracket only while it is unmatched (`_trim()`), which keeps `aia art. 1(1)`
+and still strips a stray trailing `)`.
+
+**Proved merge-neutral before re-applying**, because a change to node keys is a resolution change
+unless demonstrated otherwise. Running both versions end-to-end over all 3,411 raw names:
+
+| | before | after |
+|---|---|---|
+| distinct keys after normalize + plural folding | 3,366 | **3,366** |
+| merge groups (raw names grouped per key) | — | **byte-for-byte identical** |
+| type assignments | — | **identical** |
+| cross-type collision decisions | 64 | **64** |
+| keys with unbalanced parens | 1,026 | **0** |
+
+So every number in this ADR stands; only the key spelling changed. The equivalence is now a test
+(`tests/test_graph_writer.py::test_the_paren_fix_did_not_change_which_names_merge`) rather than a
+one-off measurement, and a balanced-bracket assertion guards against regression.
+
+**Also added: `display_name`.** `canonical_name` is lowercased and de-hyphenated, which is right for
+a key and wrong for prose — the graph would have cited `high risk` and `aia art. 1(1)`. Each node now
+carries the most frequent raw surface form (`high-risk`, `AIA Art. 1(1)`), ties broken by length then
+lexically so it is reproducible. `resolved-entities.json` goes from 5 keys to 6.
+
+**What I learned.** The four stages were each measured for what they *merged*, and the output was
+correct on that axis. Nobody checked whether the resulting identifier was well-formed, because the
+identifier was not what the stage was for. The bug lived for a whole stage in the one field every
+downstream consumer keys on.

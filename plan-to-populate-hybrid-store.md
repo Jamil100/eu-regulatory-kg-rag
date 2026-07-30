@@ -1,7 +1,10 @@
 # Next steps: from a 10-chunk pilot to a populated hybrid store
 
 **Status:** ~~revised plan, incorporating pre-flight probes, retry hardening, and audit additions.~~
-**Step 0 complete (2026-07-28).** Next action is Step 1, pending the cost decision at the end of Step 0.
+~~**Step 0 complete (2026-07-28).** Next action is Step 1, pending the cost decision at the end of Step 0.~~
+**Steps 0–4 complete (2026-07-30).** The Neo4j graph exists: 3,366 nodes, 6,658 relationships,
+idempotent load, all six Cypher templates returning rows. **Next action is Step 5** (vector index),
+starting with the `schemas.py` dependency inversion, plus the eval question set on the parallel track.
 **Exit criterion:** roadmap weeks 1–2 complete — a populated Neo4j graph and pgvector index.
 
 ## Context
@@ -213,7 +216,22 @@ Pydantic validation failure rate.
 
 ---
 
-## Step 2 — Post-run audit (before building anything on top)
+## ~~Step 2 — Post-run audit~~ ✅ DONE — every check run, `_TBD_` filled
+
+> **Outcome.** `src/ingest/audit.py` runs every integrity check at corpus scale, read-only and with
+> no API calls. Measured: validation failure rate **0.09%** (1 of 1108), dangling refs **54**,
+> orphan entities **628 (8.4%)**, endpoint violations **357 (5.3%)**, bare self-articles **0**, type
+> collisions **66**, confidence **10 distinct values 0.6–0.96**, `INTERACTS_WITH` **130**. The
+> `_TBD_` at `docs/failure-notes.md:12` is filled and the metrics status line is flipped.
+>
+> **Two corrections made later, during Step 4.** The histograms in the metrics doc had been
+> transcribed by hand mid-run and undercounted by 110 entities and 142 relationships against their
+> own headline totals — regenerated from `--json`. And **counting `INTERACTS_WITH` was the wrong
+> check**: 130 looked like the worry resolved, but every one of those edges ends at a `Regulation`,
+> not an `Article`, which is what actually broke `cross_regulation`. No histogram here records an
+> endpoint type. That is the Step 2 gap worth remembering.
+
+### ~~Original checklist~~ (all items done)
 
 The pilot's 0% validation failure metric is precisely the one the failure notes call out as *"a 0%
 failure rate looked like success and wasn't."* Repeat the integrity checks at corpus scale with a
@@ -290,7 +308,45 @@ The stub already fixes the design: normalize → exact match → Embed v4 cosine
 
 ---
 
-## Step 4 — Graph writer (`src/ingest/graph_writer.py`) → Neo4j
+## ~~Step 4 — Graph writer~~ ✅ DONE — 3,366 nodes / 6,658 edges, idempotent, 46 tests
+
+> **Outcome.** `src/ingest/graph_writer.py` loads the graph and re-running is a verified no-op.
+> 12 labels + a shared `:Entity` label, 13 relationship types, per-label uniqueness constraints
+> (Neo4j 5 Community has property uniqueness; `IS NODE KEY` is Enterprise). Suite 18 → 48.
+> Full numbers in **`docs/metrics/graph-load.md`**.
+>
+> **Load cost: 2.7–3.1s warm, 9.4s cold** (median of 3 each). The graph write itself is 1.7s — 0.18s
+> derivation + 1.5s of Bolt writes; the cold run's extra ~6s is JVM warmup and query-plan caching on
+> Neo4j's side. An earlier draft of this note quoted "~10 seconds" from one cold measurement, which
+> described the cost of *starting* Neo4j as though it were the cost of loading.
+>
+> **`build_graph()` is pure**, so every reported count is asserted without a database — the DB-backed
+> tests skip cleanly when Bolt is unreachable rather than reddening CI.
+>
+> **The resolved JSON was not enough.** It holds nodes only, and edges carry *raw* head/tail strings;
+> joining by raw name matches ~48% of endpoints, versus **98.4% (6,660 of 6,767)** through
+> `resolve_corpus()["key"]`. The loader imports the resolver rather than reading the file.
+>
+> **Three of the six templates were wrong** — `cross_regulation` returned zero rows,
+> `obligations_for_system` was a cartesian product, and `definition_of` pinned `:Article` on a tail
+> that also accepts `:Annex`, silently missing 48 of 337 defined terms. Per-chunk edge provenance also
+> inflated `obligations_for_system` to 24,428 rows until `RETURN DISTINCT`. Full write-up in
+> `docs/failure-notes.md`.
+>
+> **A prerequisite the plan found only by checking:** `normalize()` was stripping the closing paren
+> off every sub-numbered article, so 1,026 of 3,366 node keys read `aia art. 1(1`. Fixed and proved
+> merge-neutral before re-applying; ADR-0009 has a Correction section. Nodes also gained
+> `display_name` for prose (`high-risk`, not `high risk`).
+>
+> **Environment note:** Docker runs inside WSL2, not Docker Desktop, so compose must be invoked from
+> a WSL shell. WSL2 localhost-forwarding does carry Bolt to Windows Python — `bolt://localhost:7687`
+> works unchanged, no `.env` entry needed. **But WSL terminates the distro when no session is open,
+> which stops the container**; keep a session alive or expect to `docker compose up -d neo4j` again.
+>
+> **`OPEN`:** no template projects a relationship, so `source_chunk_id` — the pgvector join key and
+> the citation provenance — is not reachable from any query yet. Phase 3 must fix it.
+
+### ~~Original plan~~ (executed, with the additions above)
 
 ```
 docker compose up -d       # neo4j + pgvector, already configured
@@ -392,9 +448,9 @@ Two notes:
 | ~~0~~ ✅ | ~~`PENALIZED_UNDER` edges present in `extractions.jsonl`; random-sample per-chunk cost recorded in the metrics doc~~ — both confirmed; plus ontology v3, ADR-0008, and new integrity checks |
 | 1a | `call_model` wrapped in `tenacity` retry; production key confirmed |
 | 1b | `extractions.jsonl` ≈ 1,108 lines; `failures.jsonl` line count is the real failure rate |
-| 2 | Type histograms, `INTERACTS_WITH` count, pre-seed status, dangling-ref count, and failure rate written into `docs/failure-notes.md` and the metrics doc — no more `_TBD_` |
+| ~~2~~ ✅ | ~~Type histograms, `INTERACTS_WITH` count, pre-seed status, dangling-ref count, and failure rate written into `docs/failure-notes.md` and the metrics doc — no more `_TBD_`~~ — all written; the three remaining `_TBD_`s are Phase 3/5 metrics, not Step 2's. Histograms regenerated during Step 4 after hand-transcription drift |
 | 3 | `deployer` / `deployers` / `the deployer referred to in Article 26(1)` resolve to one node; threshold justified by 30 labeled pairs; ADR written |
-| 4 | Loader run twice → identical counts; all six Cypher templates return non-empty results in Neo4j Browser |
+| ~~4~~ ✅ | ~~Loader run twice → identical counts; all six Cypher templates return non-empty results in Neo4j Browser~~ — both confirmed, and both are now tests rather than manual checks; 2 of the 6 templates had to be fixed to get there |
 | 5 | `SELECT count(*) FROM chunks WHERE embedding IS NOT NULL` = 1,108; recall@10 measured at both 1536 and 512 dims; annex chunks retain provenance |
 | Eval | `wc -l eval/questions.jsonl` ≥ 50, every row has a non-empty gold, strata match §5.3 |
 

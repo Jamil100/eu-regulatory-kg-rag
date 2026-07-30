@@ -59,6 +59,30 @@ TYPE_PRIORITY = [
 ABBREVIATIONS = {short.lower(): short for short in FOREIGN_INSTRUMENTS.values()}
 ABBREVIATIONS.update({"aia": "AI Act", "ai act": "AI Act", "eu ai act": "AI Act"})
 
+_BRACKET_PARTNER = {")": "(", "]": "[", "(": ")", "[": "]"}
+
+
+def _trim(text: str) -> str:
+    """Strip surrounding punctuation, but keep brackets that belong to the name.
+
+    A blind `.strip(" .,;:()[]")` ate the closing paren of every sub-numbered
+    article: `AIA Art. 1(1)` became `aia art. 1(1`, and 1,026 of 3,366 nodes
+    carried an unbalanced paren. Every Cypher template matches on
+    `canonical_name`, so the query side would have had to reproduce that mangled
+    form forever. A bracket is peeled only while it has no partner, which leaves
+    `aia art. 1(1)` intact and still strips a stray `(a)` wrapper.
+    """
+    text = text.strip(" .,;:")
+    while text:
+        if text[-1] in ")]" and text.count(_BRACKET_PARTNER[text[-1]]) < text.count(text[-1]):
+            text = text[:-1]
+        elif text[0] in "([" and text.count(_BRACKET_PARTNER[text[0]]) < text.count(text[0]):
+            text = text[1:]
+        else:
+            break
+        text = text.strip(" .,;:")
+    return text
+
 
 def normalize(name: str) -> str:
     """Surface-form normalisation. Case, accents, quotes, punctuation, whitespace.
@@ -79,8 +103,19 @@ def normalize(name: str) -> str:
     # to settle something a character class settles.
     text = re.sub(r"[-‐-―]+", " ", text)
     text = re.sub(r"\s+", " ", text)
-    text = text.strip(" .,;:()[]")
+    text = _trim(text)
     return ABBREVIATIONS.get(text, text)
+
+
+def _display_name(surface: collections.Counter) -> str:
+    """The raw mention to show a human. `canonical_name` is a key, not prose.
+
+    Normalisation lowercases and de-hyphenates, so the key reads `aia art. 1(1)`
+    and `high risk` where answer text wants `AIA Art. 1(1)` and `high-risk`. The
+    most frequent surface form wins; ties break by length then lexically, so the
+    choice is reproducible rather than dependent on iteration order.
+    """
+    return max(surface.items(), key=lambda kv: (kv[1], len(kv[0]), kv[0]))[0]
 
 
 def _plural_map(names: set[str]) -> dict[str, str]:
@@ -262,17 +297,24 @@ def resolve_corpus() -> dict:
 
     # Surviving nodes are (resolved type, resolved name) pairs.
     nodes: dict[tuple[str, str], dict] = {}
+    surfaces: dict[tuple[str, str], collections.Counter] = collections.defaultdict(
+        collections.Counter
+    )
     for m in mentions:
         k = key[m["canonical_name"]]
         node = nodes.setdefault((types[k], k), {
-            "type": types[k], "canonical_name": k,
+            "type": types[k], "canonical_name": k, "display_name": "",
             "aliases": set(), "mentions": 0, "chunk_ids": set(),
         })
         node["mentions"] += 1
         node["chunk_ids"].add(m["chunk_id"])
+        surfaces[(types[k], k)][m["canonical_name"]] += 1
         if m["canonical_name"] != k:
             node["aliases"].add(m["canonical_name"])
         node["aliases"].update(m["aliases"])
+
+    for nid, node in nodes.items():
+        node["display_name"] = _display_name(surfaces[nid])
 
     return {
         "mentions": len(mentions),

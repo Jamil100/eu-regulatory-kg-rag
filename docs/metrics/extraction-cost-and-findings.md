@@ -209,16 +209,21 @@ extraction runs at ~10 calls/min, well under any rate limit.
 
 Every one of the 12 entity types and all 13 relationship types is used.
 
+Regenerated from `python -m src.ingest.audit --json` on 2026-07-30. An earlier
+version of this table was transcribed by hand mid-run and undercounted by 110
+entities and 142 relationships against its own headline totals — read these off
+the tool, do not retype them.
+
 | Entity type | Uses | Distinct names |
 |---|---|---|
-| Article | 1969 | 1164 |
-| Obligation | 1215 | **1141** |
-| DefinedTerm | 1189 | 542 |
-| ActorRole | 956 | **104** |
-| Authority | 872 | 97 |
+| Article | 1998 | 1169 |
+| Obligation | 1258 | **1182** |
+| DefinedTerm | 1206 | 549 |
+| ActorRole | 966 | **105** |
+| Authority | 881 | 101 |
 | SystemType | 334 | 73 |
 | Regulation | 219 | 74 |
-| Annex | 193 | 13 |
+| Annex | 195 | 13 |
 | RiskCategory | 148 | **4** |
 | LawfulBasis | 145 | 136 |
 | Right | 104 | 68 |
@@ -228,15 +233,15 @@ Three things to read off this table:
 
 - **`RiskCategory` is 4 distinct values across 148 uses.** Before v3 it was 6
   values of which 5 were not risk categories. The junk-drawer problem is gone.
-- **`Obligation` is 94% unique** (1141 distinct of 1215). Obligations are phrased
+- **`Obligation` is 94% unique** (1182 distinct of 1258). Obligations are phrased
   per-chunk and barely repeat, so entity resolution has almost nothing to merge
-  there. The compressible types are `ActorRole` (956 → 104) and `Authority`
-  (872 → 97). Tune the Phase-1 resolution threshold on those.
+  there. The compressible types are `ActorRole` (966 → 105) and `Authority`
+  (881 → 101). Tune the Phase-1 resolution threshold on those.
 - **`bare self-articles: 0 of 1108`** — the v3 granularity rule held perfectly.
   This was ~50/50 under v2 and is the single change most protective of the
   `REFERENCES` backbone.
 
-Relationship counts: `APPLIES_TO` 2578, `IMPOSES` 1210, `REFERENCES` 1136,
+Relationship counts: `APPLIES_TO` 2649, `IMPOSES` 1253, `REFERENCES` 1164,
 `DEFINED_IN` 514, `ENFORCED_BY` 383, `LISTED_IN` 191, `CLASSIFIED_AS` 171,
 `PERMITS` 137, `INTERACTS_WITH` 130, `GRANTS` 86, `EXEMPT_FROM` 58,
 `PENALIZED_UNDER` 19, `SETS_PENALTY` 12.
@@ -246,6 +251,15 @@ bridge exists. `PENALIZED_UNDER` (19) and `SETS_PENALTY` (12) are thin because
 penalties genuinely live in few articles, but the `enforcement_chain` Cypher
 template depends on them, so confirm in Phase 1 Step 4 rather than assume.
 
+> **Confirmed in Step 4, and the count was not the thing to check.** `enforcement_chain`
+> works: 216 obligations carry `ENFORCED_BY` → `Authority`, and its `PENALIZED_UNDER`
+> leg is an `OPTIONAL MATCH`, so the thinness degrades the answer rather than emptying
+> the query (only 4 obligations have both). **`cross_regulation` was the one that
+> failed, and its edge count was never the problem** — all 130 `INTERACTS_WITH` edges
+> point at a *Regulation*, never at an Article, while the template required
+> `Article↔Article`. A healthy-looking count in this table said nothing about whether
+> the shape matched. See `docs/failure-notes.md`.
+
 ### Integrity at corpus scale
 
 | Check | Count | Rate |
@@ -254,12 +268,12 @@ template depends on them, so confirm in Phase 1 Step 4 rather than assume.
 | Orphan entities (no edge) | 628 | 8.4% of entities |
 | Endpoint violations | 357 | 5.3% of edges |
 | Bare self-articles | 0 | 0% |
-| Type collisions (name under 2+ types) | 65 | — |
+| Type collisions (name under 2+ types) | 66 | — |
 
 All detected, none silently dropped. Run `python -m src.ingest.audit` to
 regenerate; re-run it after entity resolution to measure what actually merged.
 
-**The 65 type collisions are two distinct problems**, which matters because only
+**The 66 type collisions are two distinct problems**, which matters because only
 one is already in the Step 3 design:
 
 - *Cross-type* — `AI system` is both `DefinedTerm` and `SystemType`; `Member State`
@@ -270,7 +284,7 @@ one is already in the Step 3 design:
 - *Case variants* — `Commission`/`commission`, `Board`/`board`, `AI Office`/`ai office`.
   This is `normalize()`'s job and already in scope.
 
-Confidence is now **10 distinct values spanning 0.6–0.96** (0.95 alone is 3346 of
+Confidence is now **10 distinct values spanning 0.6–0.96** (0.95 alone is 3435 of
 6767). Richer than the pilot's five, still ordinal, still not a probability.
 
 ### The one chunk that did not extract
@@ -445,9 +459,11 @@ across regulations, so the namespacing is load-bearing, not cosmetic.
 - **Confidence is coarse.** Decide whether five discrete values are enough to
   filter on before relying on it in retrieval.
 - **Disjunction is unmodelled** (see finding 2).
-- **`INTERACTS_WITH` is sparse** — 3 edges across 28 chunks. It is the
+- ~~**`INTERACTS_WITH` is sparse** — 3 edges across 28 chunks. It is the
   cross-regulation bridge every Phase 5 cross-reg question traverses. Count it
-  corpus-wide in the post-run audit before assuming the bridge exists.
+  corpus-wide in the post-run audit before assuming the bridge exists.~~
+  **Answered: 130 edges corpus-wide.** But counting it was the wrong check — see the
+  Step 4 note above. The bridge exists and points somewhere the query did not look.
 
 **Closed by Run 3:** `PENALIZED_UNDER` untested (3a); sample bias in the
 cost-per-chunk figure (3b).
@@ -479,7 +495,9 @@ unavailable and the other unacceptable, and paid the $23."
 ```bash
 python -m src.ingest.extract                      # the 10 test chunks + cost report
 python -m src.ingest.extract --chunk-id <id> ...  # targeted re-run
-python -m src.ingest.extract --all                # full corpus — not yet run
+python -m src.ingest.extract --all                # full corpus — run 2026-07-29, 1107/1108
+python -m src.ingest.audit                        # the numbers in this document
+python -m src.ingest.audit --json                 # regenerate the tables above
 ```
 
 Responses are cached on disk under `data/cache/extraction/`, keyed by a hash of

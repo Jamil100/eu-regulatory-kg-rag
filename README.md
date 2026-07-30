@@ -16,7 +16,7 @@ _TODO: embed demo video._
 
 ## Architecture
 
-See [docs/roadmap.md](docs/roadmap.md) for the full design. High level:
+See [docs/kg-rag-eu-ai-act-roadmap.md](docs/kg-rag-eu-ai-act-roadmap.md) for the full design. High level:
 
 ```
 Ingestion:  EUR-Lex → parser → chunker → {Command A extraction → Neo4j, Embed v4 → pgvector}
@@ -38,11 +38,17 @@ uv sync                       # or: pip install -e .
 
 # 2. Data stores
 docker compose up -d          # neo4j + postgres/pgvector
+# Docker inside WSL2 rather than Docker Desktop? Run compose from a WSL shell.
+# WSL2 forwards Bolt to Windows on localhost:7687, but it stops the container
+# when the last WSL session closes -- keep one open, or bring it back up.
 
 # 3. Ingest
-python -m src.ingest.parser
-python -m src.ingest.extractor
-python -m src.index.embedder
+python -m src.ingest.chunker            # EUR-Lex HTML -> paragraph chunks
+python -m src.ingest.extract --all      # Command A extraction (~$24, 1.5-3h)
+python -m src.ingest.audit              # corpus-scale integrity report
+python -m src.ingest.entity_resolution --apply
+python -m src.ingest.graph_writer --apply --verify   # -> Neo4j
+python -m src.index.embedder            # -> pgvector (TODO: not implemented)
 
 # 4. Serve
 uvicorn src.api.app:app --reload
