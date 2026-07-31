@@ -1,6 +1,6 @@
 # Graph load metrics (Phase 1 Step 4)
 
-Status: **loaded and idempotent.** 3,366 nodes and 6,658 relationships in Neo4j from 1,107 extracted
+Status: **loaded and idempotent.** 3,366 nodes and 6,680 relationships in Neo4j from 1,107 extracted
 chunks. All six Cypher templates return rows; three had to be fixed to get there.
 
 Companion to `extraction-cost-and-findings.md`, which measures what came *out of the model*. This
@@ -53,7 +53,7 @@ In-process breakdown, so the cold/warm gap is attributable rather than mysteriou
 | `build_graph()` — pure derivation, parses 1,107 rows through Pydantic | 0.18s | — |
 | `apply_schema()` — 12 constraints + 1 index, all `IF NOT EXISTS` | 0.06s | 0.06s |
 | `write_nodes()` — 3,366 rows, 12 statements | 0.73s | 0.58s |
-| `write_edges()` — 6,658 rows, 13 statements | 0.97s | 0.72s |
+| `write_edges()` — 6,680 rows, 13 statements | 0.97s | 0.72s |
 | **graph write total** | **1.70s** | **1.30s** |
 
 **The work is ~2s; the cold run's extra ~6s is Neo4j-side** — JVM warmup and query-plan caching for
@@ -70,7 +70,7 @@ interpolated after being checked against the closed `Literal` ontology.
 | | Count |
 |---|---|
 | Nodes | **3,366** |
-| Relationships | **6,658** |
+| Relationships | **6,680** (6,658 extracted + 22 derived) |
 | Distinct `(head, TYPE, tail)` triples | 6,311 |
 | Parallel relationship instances | **347 (5.2%)** |
 | Connected nodes | 3,254 |
@@ -113,7 +113,7 @@ separate chunks**. See the template baseline below for what that does to row cou
 | LISTED_IN | 191 | 31 |
 | CLASSIFIED_AS | 171 | 3 |
 | PERMITS | 137 | 7 |
-| INTERACTS_WITH | 130 | 12 |
+| INTERACTS_WITH | 152 (130 extracted + 22 derived) | 1 |
 | GRANTS | 86 | 0 |
 | EXEMPT_FROM | 58 | 27 |
 | PENALIZED_UNDER | 19 | 0 |
@@ -128,7 +128,8 @@ separate chunks**. See the template baseline below for what that does to row cou
 | — same join by naive raw-string match against `resolved-entities.json` | **~48%** |
 | Skipped as dangling (endpoint never declared as an entity) | **107**, 36 distinct names |
 | Collapsed by `MERGE` on `(head, TYPE, tail, chunk)` | 2 |
-| **Loaded** | **6,658** |
+| Derived cross-regulation bridges (see below) | **+22** |
+| **Loaded** | **6,680** |
 
 **The naive join loses half the graph**, which is the single most load-bearing fact about this stage.
 `resolved-entities.json` holds nodes only, and edges in `extractions.jsonl` carry raw, pre-normalised
@@ -136,7 +137,58 @@ separate chunks**. See the template baseline below for what that does to row cou
 
 **Type reconciliation repaired a third of the endpoint violations for free:** 357 before resolution,
 **241 after** — 116 fixed (32%), because a violation caused by a name being typed inconsistently
-across chunks stops being a violation once the name has one agreed type.
+across chunks stops being a violation once the name has one agreed type. Widening
+`INTERACTS_WITH`'s allowed head to include `Annex` then cleared 11 more, leaving **230**.
+
+## The derived cross-regulation bridge
+
+`INTERACTS_WITH` had **zero `Article↔Article` edges**, and that was not the design: `ALLOWED_ENDPOINTS`
+permits it and the roadmap specifies it outright — *"article → article across regulations — the AI Act
+↔ GDPR bridge, and your best demo material."*
+
+The extractor identified the foreign article correctly in **12 of 12** chunks that cite one, filed it
+as `REFERENCES`, then emitted `INTERACTS_WITH` pointing at the *instrument*:
+
+```
+aia-art26-para9   REFERENCES      AIA Art. 26(9) → GDPR Art. 35   ← the bridge, present
+                  INTERACTS_WITH  AIA Art. 26(9) → GDPR           ← collapsed to the instrument
+```
+
+Root cause is the Step 0 `RiskCategory` pattern again: **the system prompt's own few-shot example
+teaches the collapse.** Fixing it at the source is an ontology-v4 change costing a ~$24 re-extraction;
+the article-level link is already present under another type, so it is derived instead — deterministic
+and free.
+
+**The rule**, applied in `build_graph()`:
+
+> for every `REFERENCES X→Y` where `X` and `Y` are both `Article`/`Annex` **and both carry a known
+> instrument prefix** (`aia|gdpr|led|eudpr`) **and those prefixes differ**, emit `INTERACTS_WITH X→Y`
+> with `derived: true`, inheriting `source_chunk_id` and `confidence`.
+
+Result: **22 bridges — 19 `Article→Article`, 3 `Annex→Article`.**
+
+**Requiring both ends to be namespaced is load-bearing, not defensive.** A first implementation checked
+only the head, which treated a bare `article 35` as belonging to a different regulation and invented
+**16 bridges no text supports**. The test asserts both endpoints carry a prefix.
+
+**What the rule deliberately cannot do.** It fires only where a `REFERENCES` edge already crosses a
+boundary. AIA Art. 99 and GDPR Art. 83 — the two penalty regimes — are conceptually parallel but
+**neither cites the other**, so no bridge appears between them, and none is invented. Those eval
+questions are marked `graph_traversable: false` instead. A test asserts no derived edge touches either
+article.
+
+| Endpoint shape | Before | After |
+|---|---|---|
+| Article → Regulation | 108 | 108 |
+| **Article → Article** | **0** | **19** |
+| Annex → Regulation | 11 | 11 |
+| Regulation → Regulation | 10 | 10 |
+| **Annex → Article** | **0** | **3** |
+| Right → Regulation | 1 | 1 |
+
+Two eval rows become genuine article-level traversals: `xr-001` gains
+`AIA Art. 3(37) → GDPR Art. 9(1)` (the special-categories definition it asks about) and `xr-002` gains
+`AIA Art. 26(9) → GDPR Art. 35` (the DPIA routing).
 
 ## Template baseline
 
@@ -172,7 +224,7 @@ happens to be defined in an Article. A template can be 86% correct and look perf
 only reason this surfaced is that two numbers that should have matched didn't, and the 51-term gap was
 worth chasing rather than rounding off.
 
-`INTERACTS_WITH` endpoint types, for the record — no histogram in the extraction metrics doc records
+`INTERACTS_WITH` endpoint types **as extracted** — no histogram in the extraction metrics doc records
 endpoint *types*, which is precisely why the healthy edge count was mistaken for a healthy bridge:
 
 | Head → Tail | Edges |
@@ -183,13 +235,17 @@ endpoint *types*, which is precisely why the healthy edge count was mistaken for
 | Right → Regulation | 1 |
 | **Article → Article** | **0** |
 
+The zero on that last row is what the derived pass above fixes — and note that it was **not** visible
+from the edge *count*, which stood at a healthy-looking 130. The count was never the risk; the endpoint
+types were, and nothing was measuring them.
+
 ## Load policies
 
 Decided in writing, not by accident, and each one verifiable in the graph:
 
 | Case | Count | Policy | Check |
 |---|---|---|---|
-| Endpoint violations | 241 | **Load, tag** `endpoint_violation: true` | `MATCH ()-[r]->() WHERE r.endpoint_violation RETURN count(r)` |
+| Endpoint violations | 230 | **Load, tag** `endpoint_violation: true` | `MATCH ()-[r]->() WHERE r.endpoint_violation RETURN count(r)` |
 | Dangling edges | 107 | **Skip**, list in the report | `skipped_dangling_names` in the report JSON |
 | Isolated nodes | 112 | **Load** | `MATCH (n:Entity) WHERE NOT (n)--() RETURN count(n)` |
 

@@ -145,16 +145,25 @@ The guide's warning is correct: an open-ended "extract all entities" prompt prod
 
 ### 5.3 The eval question set (draft it now)
 
-50–100 questions, stratified. Target distribution:
+50–100 questions, stratified. Target distribution (**revised 2026-07-31** — 8 strata, total 100; the
+refusal budget is unchanged at 10, split into two modes, and `hard-negative` is added with a target so
+every stratum has one):
 
-| Stratum | Count | Example |
-|---|---|---|
-| Single-hop | 20 | "How does the AI Act define a 'deployer'?" |
-| Two-hop | 20 | "Which transparency obligations apply to deployers of emotion recognition systems?" |
-| Three-hop | 15 | "A German company deploys a high-risk system from Annex III — which authority enforces the documentation obligations and under which article are violations fined?" |
-| Cross-regulation | 15 | "How do the AI Act's data governance requirements in Article 10 interact with GDPR lawful-basis requirements?" |
-| Aggregation | 10 | "List every obligation that applies to providers of GPAI models." |
-| Out-of-scope (must refuse) | 10 | "What does the US AI Executive Order require?" — the system must say the corpus doesn't cover it, with no invented citation. |
+| Stratum | Count | Cites? | Example |
+|---|---|---|---|
+| Single-hop | 20 | yes | "How does the AI Act define a 'deployer'?" |
+| Two-hop | 20 | yes | "Which transparency obligations apply to deployers of emotion recognition systems?" |
+| Three-hop | 15 | yes | "A German company deploys a high-risk system from Annex III — which authority enforces the documentation obligations and under which article are violations fined?" |
+| Cross-regulation | 15 | yes | "How do the AI Act's data governance requirements in Article 10 interact with GDPR lawful-basis requirements?" |
+| Aggregation | 10 | yes | "List every obligation that applies to providers of GPAI models." |
+| Out-of-scope (must refuse) | 5 | **no citation** | "What does the US AI Executive Order require?" — outside the corpus entirely; refuse and cite nothing. |
+| Unanswerable (must refuse) | 5 | **no citation** | "How long must Art. 26(10) reports be retained?" — *in* the corpus, but the text states no period. Refuse by naming the specific absence. |
+| Hard-negative (false premise) | 10 | **must cite** | "Under the GDPR, is an undertaking's fine the *lower* of the amount and the turnover percentage?" — reject the premise and ground the correction in retrieved text. |
+
+**The three refusal modes are deliberately separate strata.** Out-of-scope and unanswerable both refuse
+and must produce *no* citation; hard-negative refuses a premise but **must** cite the text that
+corrects it. Averaging them into one "refusal" number hides which behaviour actually failed, and the
+three carry different `must_cite` conventions that `tests/test_eval_questions.py` enforces per-mode.
 
 Gold answers: write them yourself from the text (tedious, ~2 evenings, non-negotiable). Grading: exact-match is impossible for legal prose, so grade with a judge prompt (Command A, temperature 0) scoring `correct / partially correct / wrong / correct refusal` against the gold answer — and hand-verify a 20% sample so you can report judge agreement.
 
@@ -238,7 +247,7 @@ kg-rag-eu-ai-act/
 │   ├── answer/             # path_to_prose, context_assembly, generate, citation_validator
 │   └── api/                # FastAPI app
 ├── eval/
-│   ├── questions.jsonl     # stratified eval set + gold answers
+│   ├── eval-questions.jsonl # stratified eval set + gold answers + gold chunk ids
 │   ├── run_benchmark.py    # runs all three systems
 │   └── judge.py            # LLM-judge + agreement check
 ├── data/                   # EUR-Lex sources + extraction cache (gitignored)

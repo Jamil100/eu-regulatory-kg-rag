@@ -29,10 +29,11 @@ from src.query.cypher_templates import TEMPLATES
 # regression anchors: if extraction or resolution changes, these numbers should
 # change deliberately and visibly, not silently.
 EXPECTED_NODES = 3_366
-EXPECTED_EDGES = 6_658
+EXPECTED_EDGES = 6_680          # 6,658 extracted + 22 derived cross-regulation bridges
 EXPECTED_DANGLING = 107
-EXPECTED_VIOLATIONS = 241
+EXPECTED_VIOLATIONS = 230       # was 241; widening INTERACTS_WITH's head to Annex cleared 11
 EXPECTED_ISOLATED = 112
+EXPECTED_DERIVED = 22           # 19 Article->Article, 3 Annex->Article
 
 
 # --------------------------------------------------------------------------
@@ -99,6 +100,48 @@ def test_violations_are_tagged_not_dropped(graph):
         tagged += edge["endpoint_violation"]
         assert edge["endpoint_violation"] == bad
     assert tagged == recomputed == EXPECTED_VIOLATIONS
+
+
+def test_derived_bridges_are_article_level_and_tagged(graph):
+    """The AI Act <-> GDPR bridge is specified article-to-article, but the extractor
+    filed every one as REFERENCES and pointed INTERACTS_WITH at the instrument. The
+    derived pass promotes them; `derived` keeps them honest about their origin."""
+    derived = [e for e in graph["edges"] if e.get("derived")]
+    assert len(derived) == EXPECTED_DERIVED
+    assert all(e["type"] == "INTERACTS_WITH" for e in derived)
+
+    types = {n["canonical_name"]: n["type"] for n in graph["nodes"]}
+    shapes = collections.Counter((types[e["head"]], types[e["tail"]]) for e in derived)
+    assert shapes == {("Article", "Article"): 19, ("Annex", "Article"): 3}
+
+
+def test_derivation_never_invents_a_bridge_between_non_citing_provisions(graph):
+    """AIA Art. 99 and GDPR Art. 83 are the two penalty regimes and are conceptually
+    parallel, but neither cites the other -- so there is no REFERENCES edge to
+    promote and no bridge may appear. The eval set marks those questions
+    `graph_traversable: false` rather than being served a fabricated edge."""
+    derived = [e for e in graph["edges"] if e.get("derived")]
+    for edge in derived:
+        ends = edge["head"] + edge["tail"]
+        assert "aia art. 99" not in ends, edge
+        assert "gdpr art. 83" not in ends, edge
+
+
+def test_derived_bridges_keep_provenance(graph):
+    """A derived edge still has to answer 'which paragraph asserted this', because
+    source_chunk_id is the citation key and the join to pgvector."""
+    for edge in (e for e in graph["edges"] if e.get("derived")):
+        assert edge["source_chunk_id"]
+        assert 0.0 <= edge["confidence"] <= 1.0
+
+
+def test_both_endpoints_must_be_namespaced(graph):
+    """Requiring only the head to carry an instrument prefix treated bare article
+    names as foreign and invented 16 bridges. Both ends must be namespaced."""
+    prefixes = ("aia", "gdpr", "led", "eudpr")
+    for edge in (e for e in graph["edges"] if e.get("derived")):
+        assert edge["head"].startswith(prefixes), edge
+        assert edge["tail"].startswith(prefixes), edge
 
 
 def test_isolated_nodes_are_kept(graph):

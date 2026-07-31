@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
 
@@ -66,6 +67,19 @@ RELATION_TYPES: frozenset[str] = frozenset(get_args(RelationType))
 SHARED_LABEL = "Entity"
 
 BATCH = 1_000
+
+# Only provisions can carry an article-level bridge. A Regulation node on either
+# end is the instrument-level edge the extractor already emits.
+_BRIDGEABLE = frozenset({"Article", "Annex"})
+
+# Resolved names are namespaced by instrument (`aia art. 26(9)`, `gdpr art. 35`),
+# which is what makes "different regulation" decidable without a lookup table.
+_REGULATION_PREFIX = re.compile(r"^(aia|gdpr|led|eudpr)\b")
+
+
+def _regulation_of(canonical_name: str) -> str | None:
+    match = _REGULATION_PREFIX.match(canonical_name)
+    return match.group(1) if match else None
 
 
 # --------------------------------------------------------------------------
@@ -120,7 +134,10 @@ def build_graph() -> dict[str, Any]:
                 "source_chunk_id": rel.source_chunk_id,
                 "confidence": rel.confidence,
                 "endpoint_violation": violation,
+                "derived": False,
             }
+
+    _derive_cross_regulation_bridges(edges, types)
 
     edge_rows = list(edges.values())
     return {
@@ -129,6 +146,69 @@ def build_graph() -> dict[str, Any]:
         "skipped": skipped,
         "stats": _stats(nodes, edge_rows, skipped),
     }
+
+
+def _derive_cross_regulation_bridges(
+    edges: dict[tuple[str, str, str, str], dict[str, Any]],
+    types: dict[str, str],
+) -> int:
+    """Promote cross-regulation REFERENCES to article-level INTERACTS_WITH.
+
+    The AI Act <-> GDPR bridge is specified as article-to-article (roadmap 5.2, and
+    ALLOWED_ENDPOINTS permits it), but the graph had **zero** Article<->Article
+    INTERACTS_WITH edges: the extractor identified the foreign article correctly in
+    12 of 12 chunks that cite one, filed it as REFERENCES, and then emitted
+    INTERACTS_WITH pointing at the *instrument*:
+
+        aia-art26-para9  REFERENCES      AIA Art. 26(9) -> GDPR Art. 35   <- the bridge
+                         INTERACTS_WITH  AIA Art. 26(9) -> GDPR           <- collapsed
+
+    The prompt's own few-shot example teaches the collapse (see the ontology-v4 note
+    in docs/failure-notes.md), so fixing it at the source means re-extracting the
+    corpus. The article-level link is already present under another type, so derive
+    it instead -- deterministic, and free.
+
+    Derived edges are tagged `derived: True` so they stay distinguishable from what
+    the model actually asserted. They inherit `source_chunk_id`, so provenance and
+    the pgvector join key survive.
+
+    Note what this rule *cannot* do: it fires only where a REFERENCES edge already
+    crosses a regulation boundary. Conceptually parallel provisions that never cite
+    each other -- AIA Art. 99 and GDPR Art. 83, the two penalty regimes -- produce
+    no such edge, so no bridge is invented between them. That is deliberate; those
+    questions are marked `graph_traversable: false` in the eval set rather than
+    served by a fabricated edge.
+    """
+    derived = 0
+    for (rel_type, head, tail, chunk_id), edge in list(edges.items()):
+        if rel_type != "REFERENCES":
+            continue
+        if types[head] not in _BRIDGEABLE or types[tail] not in _BRIDGEABLE:
+            continue
+        head_reg, tail_reg = _regulation_of(head), _regulation_of(tail)
+        # BOTH ends must be namespaced to a known instrument. Requiring only the
+        # head would treat an un-namespaced article ("article 35", which the
+        # extractor sometimes emits) as belonging to a different regulation and
+        # invent 16 bridges that no text supports.
+        if head_reg is None or tail_reg is None or head_reg == tail_reg:
+            continue
+        bridge = ("INTERACTS_WITH", head, tail, chunk_id)
+        if bridge in edges:
+            continue
+        allowed = ALLOWED_ENDPOINTS["INTERACTS_WITH"]
+        edges[bridge] = {
+            "type": "INTERACTS_WITH",
+            "head": head,
+            "tail": tail,
+            "source_chunk_id": chunk_id,
+            "confidence": edge["confidence"],
+            "endpoint_violation": (
+                types[head] not in allowed[0] or types[tail] not in allowed[1]
+            ),
+            "derived": True,
+        }
+        derived += 1
+    return derived
 
 
 def _stats(
@@ -150,6 +230,7 @@ def _stats(
         "violations_by_type": dict(
             collections.Counter(e["type"] for e in violations).most_common()
         ),
+        "derived_edges": sum(1 for e in edges if e.get("derived")),
         "isolated_nodes": sum(1 for n in nodes if n["canonical_name"] not in adjacency),
         "components": len(components),
         "largest_components": components[:5],
@@ -259,7 +340,8 @@ def write_edges(driver: Driver, edges: list[dict]) -> int:
                 MATCH (t:{SHARED_LABEL} {{canonical_name: row.tail}})
                 MERGE (h)-[r:{rel_type} {{source_chunk_id: row.source_chunk_id}}]->(t)
                 SET r.confidence = row.confidence,
-                    r.endpoint_violation = row.endpoint_violation
+                    r.endpoint_violation = row.endpoint_violation,
+                    r.derived = row.derived
             """
             for i in range(0, len(rows), BATCH):
                 batch = rows[i:i + BATCH]
@@ -319,6 +401,8 @@ def _print_report(graph: dict, live: dict | None = None) -> None:
           f"  ({len(stats['skipped_dangling_names'])} distinct names) -- policy: skip, report")
     print(f"endpoint violations     : {stats['endpoint_violations']}"
           f"  -- policy: load, tag endpoint_violation=true")
+    print(f"derived bridges         : {stats['derived_edges']}"
+          f"  -- cross-regulation REFERENCES promoted to INTERACTS_WITH")
     print(f"isolated nodes          : {stats['isolated_nodes']}  -- policy: load")
     print(f"components              : {stats['components']}"
           f"  largest {stats['largest_components']}")

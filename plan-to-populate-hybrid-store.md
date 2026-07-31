@@ -405,10 +405,16 @@ modules start importing schemas, it is a much wider change.
 The global grading rule is still worth adopting as stated: *an answer counts as `correct` only if it
 cites a source paragraph that was actually retrieved.*
 
-Expand toward the roadmap's stratification (§5.3): 20 single-hop, 20 two-hop, 15 three-hop,
+~~Expand toward the roadmap's stratification (§5.3): 20 single-hop, 20 two-hop, 15 three-hop,
 15 cross-regulation, 10 aggregation, 10 out-of-scope-must-refuse. The 6 rows currently in
 `eval/questions.jsonl` cover one example of each shape, so they are a template — but 5 of the 6 have
-an empty `gold` and need writing too.
+an empty `gold` and need writing too.~~
+
+> **Superseded (2026-07-31).** `eval/questions.jsonl` is gone; the set is now
+> **`eval/eval-questions.jsonl`, 23 hand-written rows** carrying `source_chunk_ids` — the gold-passage
+> field the old file never had, and the one that unblocks the ADR-0004 recall measurement (21 rows are
+> scoreable). §5.3 is restated as 8 strata totalling 100: single-hop 20, two-hop 20, three-hop 15,
+> cross-regulation 15, aggregation 10, out-of-scope 5, unanswerable 5, hard-negative 10.
 
 Two notes:
 
@@ -452,7 +458,7 @@ Two notes:
 | 3 | `deployer` / `deployers` / `the deployer referred to in Article 26(1)` resolve to one node; threshold justified by 30 labeled pairs; ADR written |
 | ~~4~~ ✅ | ~~Loader run twice → identical counts; all six Cypher templates return non-empty results in Neo4j Browser~~ — both confirmed, and both are now tests rather than manual checks; 2 of the 6 templates had to be fixed to get there |
 | 5 | `SELECT count(*) FROM chunks WHERE embedding IS NOT NULL` = 1,108; recall@10 measured at both 1536 and 512 dims; annex chunks retain provenance |
-| Eval | `wc -l eval/questions.jsonl` ≥ 50, every row has a non-empty gold, strata match §5.3 |
+| Eval | `wc -l eval/eval-questions.jsonl` ≥ 50, every row has a non-empty gold **and gold `source_chunk_ids`**, strata match §5.3, `pytest tests/test_eval_questions.py` green |
 
 Run `pytest` after Steps 3–5; the suite is ~~currently 8 schema tests~~ **now 18 tests** in
 `tests/test_schemas.py` and should grow with each stage.

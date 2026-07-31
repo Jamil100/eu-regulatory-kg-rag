@@ -175,7 +175,12 @@ ALLOWED_ENDPOINTS: dict[str, tuple[set[str], set[str]]] = {
     "ENFORCED_BY": ({"Obligation", "Regulation", "Article", "Right"}, {"Authority"}),
     "PENALIZED_UNDER": ({"Obligation"}, _PROVISION),
     "EXEMPT_FROM": ({"ActorRole", "SystemType", "Obligation"}, {"Obligation"} | _PROVISION),
-    "INTERACTS_WITH": ({"Regulation", "Article"}, {"Regulation", "Article"}),
+    # Annex is a head here because an annex genuinely does interact with a foreign
+    # instrument -- AIA Annex VIII points at GDPR Art. 35. Widened 2026-07-31: the
+    # old {Regulation, Article} head flagged 11 real Annex->Regulation edges as
+    # violations, and would have flagged the derived Annex->Article bridges too.
+    # Validation-only, so this costs no re-extraction.
+    "INTERACTS_WITH": (_PROVISION | {"Regulation"}, {"Regulation", "Article"}),
     "PERMITS": ({"Article", "Regulation", "Annex"}, {"LawfulBasis"}),
     "GRANTS": (_PROVISION | {"Regulation"}, {"Right"}),
     "SETS_PENALTY": (_PROVISION, {"Penalty"}),

@@ -18,15 +18,19 @@ A change is marked `DONE` only if code in this repo enforces it.
   on 25 adversarial hand-labelled pairs. The classes are **not linearly separable** — see
   `docs/adr/adr-0009-entity-resolution.md`. Deterministic rules do the merging; the embedding
   pass returned one candidate over the whole corpus and it was a false merge.
-- Graph load: **3,366 nodes / 6,658 relationships** in Neo4j from 1,107 chunks. Edges skipped
-  as dangling **107 (1.6%)**; loaded but tagged as endpoint-violating **241 (3.6%)**; isolated
-  nodes **112 (3.3%)**. Re-running the loader is a verified no-op
-  (`tests/test_graph_writer.py::test_loading_twice_is_a_no_op`).
+- Graph load: **3,366 nodes / 6,680 relationships** in Neo4j from 1,107 chunks (6,658 extracted +
+  **22 derived** cross-regulation bridges). Edges skipped as dangling **107 (1.6%)**; loaded but
+  tagged as endpoint-violating **230 (3.4%)**; isolated nodes **112 (3.3%)**. Re-running the loader
+  is a verified no-op (`tests/test_graph_writer.py::test_loading_twice_is_a_no_op`).
 - Cypher templates broken on first contact with a real graph: **3 of 6** — one returned zero rows,
   one was a cartesian product, one silently missed 48 of 337 defined terms. Plus **1** row-count
   defect from parallel edges (24,428 rows where 169 were correct).
-- Graph load wall-clock: **2.7–3.1s warm, 9.4s cold** (3,366 nodes + 6,658 edges; the graph write is
+- Graph load wall-clock: **2.7–3.1s warm, 9.4s cold** (3,366 nodes + 6,680 edges; the graph write is
   1.7s of that, the rest is Neo4j JVM/plan-cache warmup). See `docs/metrics/graph-load.md`.
+- Eval-set metadata defects found on first mechanical check: **10 of 23 rows** declared graph edges
+  their gold chunks do not carry, and **1 row's gold chunk did not contain its own answer**
+  (`hn-001` pointed at AIA Art. 99(1), which states no figure). Golds themselves were sound — all
+  41 gold chunk ids exist and 16 spot-checked claims matched the source text.
 - Router misclassification rate: _TBD_
 - Citation-validation rejection rate: _TBD_
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
@@ -770,3 +774,66 @@ didn't.
 **Consequence for how I test queries:** "returns rows" is a smoke test, not a check. What actually
 found things here was comparing a query's coverage against the edges that ought to satisfy it — so the
 template tests now assert coverage (334 defined terms reachable, 169 exact rows), not just non-emptiness.
+
+---
+
+# The cross-regulation bridge existed under the wrong name for a whole phase
+
+**What happened.** `INTERACTS_WITH` is the AI Act ↔ GDPR bridge — the roadmap calls it "your best demo
+material" and specifies it as *article → article across regulations*. The loaded graph had **130 of
+them and not one connected two articles.** Every single edge terminated at a `Regulation` node.
+
+The extractor was not failing to see the link. In **12 of 12** chunks that cite a specific foreign
+article it identified that article correctly, created the entity, and emitted a `REFERENCES` edge to
+it — then emitted `INTERACTS_WITH` pointing at the instrument instead:
+
+```
+aia-art26-para9   REFERENCES      AIA Art. 26(9) → GDPR Art. 35   ← the bridge, present
+                  INTERACTS_WITH  AIA Art. 26(9) → GDPR           ← collapsed to the instrument
+```
+
+**Why it mattered.** `cross_regulation` is one of six templates and the whole point of the graph path.
+It returned zero rows, and the eval set's cross-regulation stratum had nothing to traverse.
+
+**What caught it.** Not the metrics. `INTERACTS_WITH` was flagged as thin in Run 3 (3 edges across 28
+chunks), the post-run audit counted it corpus-wide at 130, and the worry was closed on that number.
+**The count was never the risk.** It was caught by reviewing the eval set's declared `ontology_edges`
+against the graph, which forced the question "130 edges between *what*?" — and no histogram anywhere
+recorded endpoint types.
+
+**Root cause: the system prompt's own few-shot example teaches the collapse.** `extract.py`'s example
+builds the `GDPR Art. 4(14)` entity, emits `REFERENCES` to it, then emits `INTERACTS_WITH → GDPR`. The
+model was being shown exactly the behaviour that was later called a bug. **This is the third time a
+defect has been traced to a demonstration in the prompt** — the `RiskCategory` junk drawer was Example
+2 since v1, and the `LawfulBasis` collapse was ADR-0007. The examples are teaching material and are not
+being reviewed as such.
+
+**What I changed.** The article-level link was already in the graph under another type, so it is derived
+rather than re-extracted: for every `REFERENCES X→Y` where both ends are `Article`/`Annex`, both carry a
+known instrument prefix, and those prefixes differ, emit `INTERACTS_WITH X→Y` tagged `derived: true`.
+**22 bridges — 19 `Article→Article`, 3 `Annex→Article`.** Zero API cost, no cache invalidation. `DONE`.
+
+Also widened `ALLOWED_ENDPOINTS["INTERACTS_WITH"]`'s head to include `Annex` — validation-only, and it
+cleared 11 pre-existing endpoint violations (241 → 230). `DONE`.
+
+**A bug in the fix, caught by the number not matching.** The first implementation checked only whether
+the *head* carried an instrument prefix. A tail with no prefix then counted as "a different regulation,"
+and the pass produced **38 bridges instead of 22** — 16 of them invented between an article and a bare,
+un-namespaced `article 35`. It was caught only because 38 disagreed with the 22 measured during
+planning. Both endpoints must be namespaced; there is now a test for it.
+
+**`OPEN` — ontology v4, recorded and not executed.** Fixing the few-shot example is the real repair, and
+it invalidates all 1,108 cache entries for a ~$24 re-extraction. The derived pass recovers the same
+edges for free, so the prompt fix waits until something else forces a re-run. **The risk of deferring:
+the derivation is a patch at load time, so any new corpus extracted with this prompt has the same hole.**
+
+**What I learned.** **A count is not a shape** — and I had already written that sentence in this file
+after Step 4, about this exact relationship type, and still had not measured the thing that mattered.
+Writing the lesson down is not the same as applying it. What finally worked was letting a *different
+artefact* interrogate the graph: the eval set declares which edges each question needs, and checking
+those declarations against reality asked a question no self-audit had asked.
+
+**And the fix needed the same scrutiny as the bug.** A derivation rule that invents edges is exactly the
+kind of change that can quietly manufacture support for whatever you were hoping to show. The only
+reason the 16 fabricated bridges did not ship is that a number measured beforehand disagreed with the
+number produced afterward.
