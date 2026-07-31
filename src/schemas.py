@@ -1,45 +1,237 @@
-"""Shared Pydantic models: ontology-constrained extraction + API contracts.
+"""Shared Pydantic models and the ontology: the single source of truth.
 
-The ontology (12 entity types, 13 relationship types) is defined once in
-src/ingest/extract.py and re-exported here, so there is a single source of
-truth. Import Entity/Relationship/Extraction from either module.
+The ontology (12 entity types, 13 relationship types) used to live in
+`src/ingest/extract.py` and be re-exported here. That made `src/api/app.py`
+import `cohere` transitively just to name an `AskRequest`, so the direction is
+now inverted: this module owns the definitions and `extract.py` imports them.
+Nothing here may import from `src.ingest`.
+
+`extract.py` re-exports the same names, so `from src.ingest.extract import
+Extraction` keeps working for the ingest-side modules that already read that way.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import BaseModel, Field
-
-from src.ingest.extract import (
-    Entity,
-    EntityType,
-    Extraction,
-    RelationType,
-    Relationship,
-)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
-    "Entity",
     "EntityType",
-    "Extraction",
     "RelationType",
+    "ENTITY_TYPES",
+    "RELATION_TYPES",
+    "ALLOWED_ENDPOINTS",
+    "Entity",
     "Relationship",
+    "Extraction",
     "Chunk",
+    "ChunkShape",
     "Citation",
     "AskRequest",
     "AskResponse",
 ]
 
+# --------------------------------------------------------------------------
+# Ontology -- locked by Literal, so anything the model invents fails validation
+# rather than silently entering the graph.
+# --------------------------------------------------------------------------
+
+EntityType = Literal[
+    "Regulation",
+    "Article",
+    "Annex",
+    "ActorRole",
+    "Obligation",
+    "RiskCategory",
+    "SystemType",
+    "Authority",
+    "LawfulBasis",
+    "DefinedTerm",
+    "Right",
+    "Penalty",
+]
+
+RelationType = Literal[
+    "DEFINED_IN",
+    "IMPOSES",
+    "APPLIES_TO",
+    "CLASSIFIED_AS",
+    "LISTED_IN",
+    "REFERENCES",
+    "ENFORCED_BY",
+    "PENALIZED_UNDER",
+    "EXEMPT_FROM",
+    "INTERACTS_WITH",
+    "PERMITS",
+    "GRANTS",
+    "SETS_PENALTY",
+]
+
+# Neo4j 5 cannot parameterize a label or a relationship type, so both are
+# interpolated into the query text by `graph_writer`. These frozensets are what
+# every value is checked against before it reaches a format string -- nothing
+# from the data can become Cypher. Derived from the Literals so the two cannot
+# drift apart.
+ENTITY_TYPES: frozenset[str] = frozenset(get_args(EntityType))
+RELATION_TYPES: frozenset[str] = frozenset(get_args(RelationType))
+
+# Which entity types may sit at each end of each relationship. The prompt states
+# these too, but Literal only validates the type *string* -- it cannot see that
+# ENFORCED_BY was pointed at a Regulation instead of an Authority. Checked after
+# parsing so the violations are counted rather than silently entering the graph.
+_PROVISION = {"Article", "Annex"}
+_DEFINABLE = {
+    "DefinedTerm", "ActorRole", "SystemType", "RiskCategory",
+    "Obligation", "Right", "LawfulBasis", "Authority", "Penalty",
+}
+_PARTY = {"ActorRole", "SystemType", "Authority"}
+
+ALLOWED_ENDPOINTS: dict[str, tuple[set[str], set[str]]] = {
+    "DEFINED_IN": (_DEFINABLE, _PROVISION),
+    "IMPOSES": (_PROVISION | {"Regulation"}, {"Obligation"}),
+    # Deliberately wide on both ends: a duty, a provision, a classification, a
+    # basis, a right or a system type can all "govern" a party -- and a duty can
+    # equally concern a kind of data ("...applies to personal data"). The
+    # obligations_for_role template filters on the :ActorRole label anyway, so a
+    # wider tail adds no noise to the query it exists to serve.
+    "APPLIES_TO": ({"Obligation", "Article", "Annex", "RiskCategory", "LawfulBasis",
+                    "Right", "SystemType", "DefinedTerm"}, _PARTY | {"DefinedTerm"}),
+    "CLASSIFIED_AS": ({"SystemType", "DefinedTerm", "ActorRole"}, {"RiskCategory"}),
+    "LISTED_IN": ({"SystemType", "DefinedTerm", "Regulation", "Obligation", "Authority"},
+                  _PROVISION),
+    "REFERENCES": (_PROVISION, _PROVISION),
+    # The tight ones -- these are where the probe found real errors.
+    "ENFORCED_BY": ({"Obligation", "Regulation", "Article", "Right"}, {"Authority"}),
+    "PENALIZED_UNDER": ({"Obligation"}, _PROVISION),
+    "EXEMPT_FROM": ({"ActorRole", "SystemType", "Obligation"}, {"Obligation"} | _PROVISION),
+    # Annex is a head here because an annex genuinely does interact with a foreign
+    # instrument -- AIA Annex VIII points at GDPR Art. 35. Widened 2026-07-31: the
+    # old {Regulation, Article} head flagged 11 real Annex->Regulation edges as
+    # violations, and would have flagged the derived Annex->Article bridges too.
+    # Validation-only, so this costs no re-extraction.
+    "INTERACTS_WITH": (_PROVISION | {"Regulation"}, {"Regulation", "Article"}),
+    "PERMITS": ({"Article", "Regulation", "Annex"}, {"LawfulBasis"}),
+    "GRANTS": (_PROVISION | {"Regulation"}, {"Right"}),
+    "SETS_PENALTY": (_PROVISION, {"Penalty"}),
+}
+
+
+class Entity(BaseModel):
+    type: EntityType
+    canonical_name: str
+    aliases: list[str] = Field(default_factory=list)
+
+
+class Relationship(BaseModel):
+    type: RelationType
+    head: str
+    tail: str
+    source_chunk_id: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class Extraction(BaseModel):
+    chunk_id: str
+    entities: list[Entity]
+    relationships: list[Relationship]
+
+
+# --------------------------------------------------------------------------
+# Corpus
+# --------------------------------------------------------------------------
+
+ChunkShape = Literal["paragraph", "annex", "definition"]
+
 
 class Chunk(BaseModel):
+    """One chunk as the chunker actually writes it.
+
+    Every field type here was read off the corpus, not guessed. The previous
+    version declared `article: str | None` against a chunker that writes ints,
+    and Pydantic v2 does not coerce int->str, so `Chunk.model_validate` rejected
+    **1,000 of the 1,108 rows**. The 108 that passed were the annex chunks, and
+    they passed only because `annex`, `annex_title`, `point` and `token_count`
+    were silently dropped as extra keys -- the model "accepted" them by throwing
+    away exactly the fields that identify them.
+
+    `extra="forbid"` is the guard against a repeat: a new chunker key now fails
+    loudly here instead of vanishing. `tests/test_chunks.py` round-trips all
+    1,108 rows, because an interface between two components is untested until
+    something has actually crossed it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     chunk_id: str
     regulation: str
-    chapter: str | None = None
-    article: str | None = None
-    paragraph: str | None = None
     text: str
 
+    # Paragraph and definition rows.
+    article: int | None = None
+    article_title: str | None = None
+    paragraph: int | None = None
+    definition: int | None = None
+
+    # Annex rows.
+    annex: str | None = None       # roman numeral, e.g. "III"
+    annex_title: str | None = None
+    section: str | None = None     # only Annexes VIII ("A"/"B"/"C") and XI ("1"/"2")
+    point: int | None = None
+
+    token_count: int | None = None
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> Chunk:
+        """Reject any row that is not exactly one of the three known shapes.
+
+        The shape is what the citation formatter and the SQL columns both key
+        off, so it is derived and validated once here rather than re-sniffed at
+        each site.
+        """
+        self.shape  # noqa: B018 -- raises if the row matches no shape
+        return self
+
+    @property
+    def shape(self) -> ChunkShape:
+        if self.annex is not None and self.point is not None:
+            return "annex"
+        if self.article is not None and self.definition is not None:
+            return "definition"
+        if self.article is not None and self.paragraph is not None:
+            return "paragraph"
+        raise ValueError(
+            f"{self.chunk_id!r} matches none of the three chunk shapes "
+            "(article+paragraph, article+definition, annex+point)"
+        )
+
+    @property
+    def citation_label(self) -> str:
+        """The human-facing locator, in the form the eval set already uses.
+
+        `AIA Art. 9(2)`, `AIA Art. 3(12)`, `AIA Annex III(4)` -- matching the
+        `citations` field of eval/eval-questions.jsonl exactly, so a generated
+        citation and a gold citation are comparable as strings.
+
+        Sectioned annexes nest the section the way the eval set already nests a
+        sub-point (`AIA Annex III(1)(a)`), giving `AIA Annex VIII(A)(1)`. Without
+        it, Annexes VIII and XI restart their point numbering per section and 25
+        chunks share 11 labels -- `Annex VIII(1)` would name the registration
+        duties of three different actors at once.
+        """
+        match self.shape:
+            case "annex":
+                section = f"({self.section})" if self.section else ""
+                return f"{self.regulation} Annex {self.annex}{section}({self.point})"
+            case "definition":
+                return f"{self.regulation} Art. {self.article}({self.definition})"
+            case _:
+                return f"{self.regulation} Art. {self.article}({self.paragraph})"
+
+
+# --------------------------------------------------------------------------
+# API contracts
+# --------------------------------------------------------------------------
 
 class Citation(BaseModel):
     chunk_id: str

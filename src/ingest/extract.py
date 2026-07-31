@@ -23,19 +23,33 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Literal
 
 import cohere
 import cohere.errors
 import httpx
 from cohere.core import ApiError
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
+)
+
+# The ontology lives in src/schemas.py so that src/api/app.py can import the API
+# contracts without dragging `cohere` in behind them. Re-exported here because
+# the ingest-side modules (audit, entity_resolution, graph_writer) and the tests
+# already import these names from this module.
+from src.schemas import (  # noqa: F401 -- re-export
+    ALLOWED_ENDPOINTS,
+    ENTITY_TYPES,
+    RELATION_TYPES,
+    Entity,
+    EntityType,
+    Extraction,
+    Relationship,
+    RelationType,
 )
 
 load_dotenv()
@@ -109,103 +123,6 @@ FOREIGN_INSTRUMENTS = {
     "directive (eu) 2016/680": "LED",
     "regulation (eu) 2018/1725": "EUDPR",
 }
-
-# --------------------------------------------------------------------------
-# Schema -- the ontology is locked by Literal, so anything the model invents
-# fails validation rather than silently entering the graph.
-# --------------------------------------------------------------------------
-
-EntityType = Literal[
-    "Regulation",
-    "Article",
-    "Annex",
-    "ActorRole",
-    "Obligation",
-    "RiskCategory",
-    "SystemType",
-    "Authority",
-    "LawfulBasis",
-    "DefinedTerm",
-    "Right",
-    "Penalty",
-]
-
-RelationType = Literal[
-    "DEFINED_IN",
-    "IMPOSES",
-    "APPLIES_TO",
-    "CLASSIFIED_AS",
-    "LISTED_IN",
-    "REFERENCES",
-    "ENFORCED_BY",
-    "PENALIZED_UNDER",
-    "EXEMPT_FROM",
-    "INTERACTS_WITH",
-    "PERMITS",
-    "GRANTS",
-    "SETS_PENALTY",
-]
-
-# Which entity types may sit at each end of each relationship. The prompt states
-# these too, but Literal only validates the type *string* -- it cannot see that
-# ENFORCED_BY was pointed at a Regulation instead of an Authority. Checked after
-# parsing so the violations are counted rather than silently entering the graph.
-_PROVISION = {"Article", "Annex"}
-_DEFINABLE = {
-    "DefinedTerm", "ActorRole", "SystemType", "RiskCategory",
-    "Obligation", "Right", "LawfulBasis", "Authority", "Penalty",
-}
-_PARTY = {"ActorRole", "SystemType", "Authority"}
-
-ALLOWED_ENDPOINTS: dict[str, tuple[set[str], set[str]]] = {
-    "DEFINED_IN": (_DEFINABLE, _PROVISION),
-    "IMPOSES": (_PROVISION | {"Regulation"}, {"Obligation"}),
-    # Deliberately wide on both ends: a duty, a provision, a classification, a
-    # basis, a right or a system type can all "govern" a party -- and a duty can
-    # equally concern a kind of data ("...applies to personal data"). The
-    # obligations_for_role template filters on the :ActorRole label anyway, so a
-    # wider tail adds no noise to the query it exists to serve.
-    "APPLIES_TO": ({"Obligation", "Article", "Annex", "RiskCategory", "LawfulBasis",
-                    "Right", "SystemType", "DefinedTerm"}, _PARTY | {"DefinedTerm"}),
-    "CLASSIFIED_AS": ({"SystemType", "DefinedTerm", "ActorRole"}, {"RiskCategory"}),
-    "LISTED_IN": ({"SystemType", "DefinedTerm", "Regulation", "Obligation", "Authority"},
-                  _PROVISION),
-    "REFERENCES": (_PROVISION, _PROVISION),
-    # The tight ones -- these are where the probe found real errors.
-    "ENFORCED_BY": ({"Obligation", "Regulation", "Article", "Right"}, {"Authority"}),
-    "PENALIZED_UNDER": ({"Obligation"}, _PROVISION),
-    "EXEMPT_FROM": ({"ActorRole", "SystemType", "Obligation"}, {"Obligation"} | _PROVISION),
-    # Annex is a head here because an annex genuinely does interact with a foreign
-    # instrument -- AIA Annex VIII points at GDPR Art. 35. Widened 2026-07-31: the
-    # old {Regulation, Article} head flagged 11 real Annex->Regulation edges as
-    # violations, and would have flagged the derived Annex->Article bridges too.
-    # Validation-only, so this costs no re-extraction.
-    "INTERACTS_WITH": (_PROVISION | {"Regulation"}, {"Regulation", "Article"}),
-    "PERMITS": ({"Article", "Regulation", "Annex"}, {"LawfulBasis"}),
-    "GRANTS": (_PROVISION | {"Regulation"}, {"Right"}),
-    "SETS_PENALTY": (_PROVISION, {"Penalty"}),
-}
-
-
-class Entity(BaseModel):
-    type: EntityType
-    canonical_name: str
-    aliases: list[str] = Field(default_factory=list)
-
-
-class Relationship(BaseModel):
-    type: RelationType
-    head: str
-    tail: str
-    source_chunk_id: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
-class Extraction(BaseModel):
-    chunk_id: str
-    entities: list[Entity]
-    relationships: list[Relationship]
-
 
 # --------------------------------------------------------------------------
 # Prompt

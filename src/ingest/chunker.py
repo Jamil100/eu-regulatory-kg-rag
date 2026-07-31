@@ -88,6 +88,12 @@ def chunk_annexes(annexes: list[dict], regulation: str) -> list[dict]:
 
     Annex rows carry `annex`/`point` where article rows carry `article`/`paragraph`;
     downstream code branches on which keys are present, so there is no shared field.
+
+    `section` is written out as its own field and not only folded into the id.
+    It was id-only until 2026-07-31, which made `Annex VIII(1)` name three
+    different provisions (Sections A, B and C) as far as any consumer reading
+    the fields was concerned -- 25 chunks over 11 ambiguous locators. The
+    parser had the value all along; the chunker used it and threw it away.
     """
     rows: list[dict] = []
     for annex in annexes:
@@ -100,6 +106,7 @@ def chunk_annexes(annexes: list[dict], regulation: str) -> list[dict]:
                     "regulation": regulation,
                     "annex": annex["annex"],
                     "annex_title": annex["annex_title"],
+                    **({"section": p["section"]} if p["section"] else {}),
                     "point": p["point"],
                     "text": p["text"],
                     "token_count": len(p["text"].split()),

@@ -14,6 +14,10 @@ A change is marked `DONE` only if code in this repo enforces it.
   output truncation, not a modelling error.
 - Extraction edge-endpoint violation rate: **5.3%** of relationships (357 of 6767)
 - Orphan-entity rate: **8.4%** of entities (628 of 7466)
+- Vector retrieval, micro recall@10 (21 labeled queries, 51 gold references, exact search,
+  1536 dims): **56.9%**; hit rate@10 **85.7%**. Per stratum: single-hop 75%, two-hop **30%**,
+  aggregation 47%. Report with the caveat that the gold set is 3.6% of the corpus —
+  see `docs/metrics/vector-index.md`.
 - Entity-resolution false merges / misses: **0 false merges, 7 of 10 misses** at cosine 0.90,
   on 25 adversarial hand-labelled pairs. The classes are **not linearly separable** — see
   `docs/adr/adr-0009-entity-resolution.md`. Deterministic rules do the merging; the embedding
@@ -46,10 +50,12 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | Root cause | Times | Where |
 |---|---|---|
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
-| **Confirmed the part I looked at, assumed it covered the whole** | **4** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article |
+| **Confirmed the part I looked at, assumed it covered the whole** | **5** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) |
 | **A count mistaken for a shape** | **2** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere |
+| **An interface neither side ever crossed** | **3** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated |
 | **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
 | **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
+| **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
 
 **What the shape of this table says.** The top row is the most expensive class — three defects, all
 from the same 4,000-token artefact, none caught by a test, each found only by reading output. **The
@@ -873,11 +879,24 @@ when they are fixed. The reason is in this file's own header: an `OPEN` item tha
 someone's memory of a planning conversation is not tracked, it is forgotten. All three are in Step 5's
 path and none is fixed yet.
 
-## 1. `Chunk` rejects 586 of 694 AI Act rows
+> **All three closed 2026-07-31** during Step 5, and a fourth of the same family was found while
+> closing them (see the section after this one). Numbers in `docs/metrics/vector-index.md`.
+
+## 1. `Chunk` rejects 586 of 694 AI Act rows — **actually 1,000 of 1,108**
 
 `src/schemas.py` declares `article: str | None` and `paragraph: str | None`. The chunker writes
 integers (`"article": 1`). Pydantic v2 does not coerce int→str, so `Chunk.model_validate` **fails on
 586 of 694 AI Act rows**.
+
+> **Correction (2026-07-31).** The real figure is **1,000 of 1,108 rows — 90% of the corpus.** The
+> "586 of 694" above counted the AI Act file only. GDPR articles are integers too, so **all 414 GDPR
+> rows failed as well** and were never checked. The heading was written after measuring one file and
+> describing it as the defect.
+>
+> This is the third time in this document the same thing has happened — the `INTERACTS_WITH` count
+> that measured edges without measuring their endpoints, the histograms transcribed from a partial
+> run, and now this. Confirming the part in front of you and reporting it as the whole is not a
+> mistake this project has made once.
 
 The 108 that pass are the annex chunks — and they pass only because Pydantic silently discards
 `annex`, `annex_title`, `point` and `token_count` as extra keys. So the model "accepts" them by
@@ -891,9 +910,11 @@ the model and the JSONL separately and assuming they matched. Nothing in the pip
 this: `chunker.py` writes raw dicts via `json.dumps` and never constructs a `Chunk`, so the type has
 never been exercised against the data it describes.
 
-- `OPEN` (since 2026-07-31) — Fix the field types and add a validator for the three row shapes. Add a
-  test that round-trips **all 1,108** rows through `Chunk`, so the model and the corpus cannot drift
-  apart again silently.
+- ~~`OPEN` (since 2026-07-31)~~ → **`DONE` (2026-07-31)** — Field types corrected against the corpus,
+  a `shape` validator rejects any row matching none of the three shapes, `extra="forbid"` makes a new
+  chunker key fail loudly instead of vanishing, and `tests/test_chunks.py` round-trips **all 1,108
+  rows** and compares the dump back to the source dict — so "accepted by discarding fields" fails too,
+  which a validate-and-count would have waved through.
 
 ## 2. `schema.sql` would lose provenance for 202 of 1,108 chunks
 
@@ -908,8 +929,12 @@ definition chunks unidentifiable — 18.2% of the corpus.
 the chunks a citation most needs to name precisely. They would be in the vector store as anonymous
 text.
 
-- `OPEN` (since 2026-07-31) — Explicit nullable columns with correct types, plus `create_indexes()`
-  split from `ensure_schema()` so HNSW is built after the bulk load rather than maintained per insert.
+- ~~`OPEN` (since 2026-07-31)~~ → **`DONE` (2026-07-31)** — 11 explicit nullable columns with the
+  corpus's real types, a `shape` column with a CHECK constraint, and a stored `citation_label`.
+  `create_indexes()` is split from `ensure_schema()` so HNSW is built after the bulk load.
+  `tests/test_embedder.py` asserts per-shape provenance survives the load rather than trusting it.
+  Note `ensure_schema()` is the path that matters: the docker initdb hook fires only on an empty
+  volume, so editing `schema.sql` on a container that has already started does nothing at all.
 
 ## 3. `entity_ids TEXT[]` is declared and never populated
 
@@ -921,8 +946,11 @@ in git history.
 The graph↔vector join runs through `chunk_id`, which is load-bearing on both sides and does work. So
 `entity_ids` is not a gap in the design; it is a vestige of a different one.
 
-- `OPEN` (since 2026-07-31) — Either populate it from the resolved graph or delete the column. A
-  schema field that is always `'{}'` is worse than no field: it reads as a feature.
+- ~~`OPEN` (since 2026-07-31)~~ → **`DONE` (2026-07-31)** — Populated by inverting
+  `resolve_corpus()["nodes"][*]["chunk_ids"]`, storing the resolved `canonical_name` so a value is
+  usable directly as a Cypher parameter. **7,465 references across 1,107 of 1,108 chunks, 0 of which
+  name a node absent from the graph.** The one chunk with an empty array is `gdpr-art70-para1`, the
+  paragraph that never extracted — a self-consistency check that passed without being arranged.
 
 **What I learned from all three together.** Every one of them is a **contract that both sides agreed to
 and neither ever tested** — a Pydantic model describing a JSONL nobody validated against it, a SQL
@@ -931,3 +959,61 @@ survived because each side was individually reasonable. This is the same shape a
 `cross_regulation` template written against a graph nobody had loaded, and it suggests the rule: **an
 interface between two components is untested until something has actually crossed it**, and writing
 both sides carefully is not a substitute.
+
+---
+
+# The fourth defect of the same family: a field the chunker computed and threw away
+
+Found 2026-07-31 while loading the vector index, by an assertion that citation labels are unique.
+
+**What happened.** `Chunk.citation_label` renders the user-facing locator — `AIA Art. 9(2)`,
+`AIA Annex III(4)` — from the chunk's own fields. A test asserted the 1,108 labels are distinct. It
+failed at 1,092: **25 chunks were sharing 11 labels.**
+
+All of them were Annex VIII and Annex XI. Those two annexes are divided into sections whose point
+numbering **restarts per section**, so Annex VIII has three different "point 1" — Section A is
+registration by providers of Annex III high-risk systems, Section B by providers of Art. 6(1)
+systems, Section C by deployers. `AIA Annex VIII(1)` named all three at once.
+
+**Why it mattered.** These are registration duties that attach to *different actors*. A citation
+resolving to the wrong one is not a formatting problem; it attributes an obligation to a party that
+does not carry it. Annex VIII is also the annex that bridges to GDPR Art. 35.
+
+**What caught it.** A uniqueness assertion over the whole corpus — not code review. The chunk ids
+were correct all along (`aia-annex8-sectionA-point1`), which is exactly why nothing had noticed:
+`annex_parser.py` computes the section, `chunker.py` passes it to `make_annex_chunk_id()`, and then
+does not write it to the record. Every consumer that reads *fields* rather than parsing *ids* saw
+ambiguity; every consumer that read ids saw none. The information was present, correct, and
+unreachable.
+
+`make_annex_chunk_id()` even carries a docstring saying the section exists because "without it those
+ids would collide and silently corrupt the vector-index/graph join". The author understood the
+hazard exactly, fixed it in the id, and did not notice the same hazard in the record.
+
+**What I changed.**
+
+- `chunk_annexes()` writes `section` as a field. `Chunk.section` carries it; `citation_label` nests
+  it the way the eval set already nests a sub-point, giving `AIA Annex VIII(A)(1)`.
+- Backfilled the two JSONL files by **re-deriving the annex rows from the source HTML** and merging
+  only the new key, refusing to write if any other field differed. **0 mismatches over 108 annex
+  rows**, so the change adds a key and alters nothing else. Deliberately not parsed out of the
+  chunk_id — inferring the data from a key derived from it cannot detect a wrong key.
+- No re-extraction: `cache_key()` hashes only model + prompt + text, and `user_prompt()` iterates a
+  fixed key tuple. Verified before writing, not assumed.
+- `tests/test_chunks.py` asserts the 32 sectioned rows, three specific labels, and global uniqueness.
+
+- `OPEN` (since 2026-07-31) — **The extractor was never told the section either.** `user_prompt()`'s
+  key tuple has no `section`, so Command A saw three Annex VIII "point 1" chunks with identical
+  metadata and no way to distinguish them. The graph's Annex VIII nodes are as ambiguous as the
+  citation labels were, and unlike the labels this one costs ~$0.70 of re-extraction to fix.
+
+**What I learned.** The three Phase-2 defects were untested *interfaces*. This one is narrower and
+worse: a value that was computed correctly, used correctly in one place, and dropped in another,
+inside a single function. The lesson is not "test your contracts" — it is that **deriving a key from
+a field and then not storing the field leaves the key as the only copy of the data**, and keys are
+not meant to be parsed. If `make_annex_chunk_id` needs an argument to stay unique, the record needs
+that argument as a column.
+
+And the check that found it cost one line. `assert len(set(labels)) == len(labels)` over a whole
+corpus is the cheapest class of test there is, and it is the third time in this document that a
+whole-corpus assertion has found something every targeted check passed clean.

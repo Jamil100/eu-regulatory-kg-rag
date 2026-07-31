@@ -33,6 +33,39 @@ def driver():
 
 
 @pytest.fixture(scope="session")
+def pg():
+    """A live Postgres connection, or skip. Same reasoning as `driver`."""
+    from src.index import pgvector_schema
+
+    try:
+        connection = pgvector_schema.connect()
+    except Exception as exc:  # noqa: BLE001 -- see the note on `driver`
+        pytest.skip(f"Postgres unreachable ({type(exc).__name__}); skipping index tests")
+    yield connection
+    connection.close()
+
+
+@pytest.fixture(scope="session")
+def indexed(pg):
+    """Skip unless the table holds the whole corpus with both arms embedded.
+
+    The vector-store equivalent of `loaded`: asserting retrieval behaviour
+    against a half-loaded table would report a load problem as a recall problem.
+    """
+    from src.index.pgvector_schema import status
+
+    state = status(pg)
+    if not state.get("table") or state.get("rows") != 1108:
+        pytest.skip(
+            f"chunks table holds {state.get('rows', 0)} of 1108 rows; "
+            "run `python -m src.index.embedder --apply`"
+        )
+    if any(count != 1108 for count in state["embedded"].values()):
+        pytest.skip(f"embeddings incomplete: {state['embedded']}")
+    return pg
+
+
+@pytest.fixture(scope="session")
 def loaded(driver, graph):
     """Skip unless the graph in the database matches the current derivation.
 

@@ -41,24 +41,24 @@ import collections
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 
 from src.config import settings
 from src.ingest.audit import load_extractions
 from src.ingest.entity_resolution import resolve_corpus
-from src.ingest.extract import ALLOWED_ENDPOINTS, ROOT, EntityType, RelationType
+from src.ingest.extract import ROOT
+
+# Neo4j 5 cannot parameterize a label or a relationship type (dynamic
+# `MERGE (n:$(row.type))` is Cypher 25+), so both are interpolated into the query
+# text. The ontology is a closed Literal, and every value is checked against
+# ENTITY_TYPES/RELATION_TYPES before it reaches a format string -- nothing from
+# the data can become Cypher.
+from src.schemas import ALLOWED_ENDPOINTS, ENTITY_TYPES, RELATION_TYPES
 
 if TYPE_CHECKING:  # keep `neo4j` off the import path of the pure functions
     from neo4j import Driver
 
 REPORT_PATH = ROOT / "data" / "processed" / "graph-load-report.json"
-
-# Neo4j 5 cannot parameterize a label or a relationship type (dynamic
-# `MERGE (n:$(row.type))` is Cypher 25+), so both are interpolated into the query
-# text. The ontology is a closed Literal, and every value is checked against it
-# before it reaches a format string -- nothing from the data can become Cypher.
-ENTITY_TYPES: frozenset[str] = frozenset(get_args(EntityType))
-RELATION_TYPES: frozenset[str] = frozenset(get_args(RelationType))
 
 # One shared secondary label. It gives the two unlabeled templates
 # (`definition_of`, `path_between`) an index to hit, and lets edge writes match

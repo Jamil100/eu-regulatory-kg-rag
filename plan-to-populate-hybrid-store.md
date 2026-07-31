@@ -2,10 +2,18 @@
 
 **Status:** ~~revised plan, incorporating pre-flight probes, retry hardening, and audit additions.~~
 ~~**Step 0 complete (2026-07-28).** Next action is Step 1, pending the cost decision at the end of Step 0.~~
-**Steps 0–4 complete (2026-07-30).** The Neo4j graph exists: 3,366 nodes, 6,658 relationships,
+~~**Steps 0–4 complete (2026-07-30).** The Neo4j graph exists: 3,366 nodes, 6,658 relationships,
 idempotent load, all six Cypher templates returning rows. **Next action is Step 5** (vector index),
-starting with the `schemas.py` dependency inversion, plus the eval question set on the parallel track.
-**Exit criterion:** roadmap weeks 1–2 complete — a populated Neo4j graph and pgvector index.
+starting with the `schemas.py` dependency inversion, plus the eval question set on the parallel track.~~
+**Steps 0–5 complete (2026-07-31). The exit criterion is met** — roadmap weeks 1–2 done: a populated
+Neo4j graph (3,366 nodes / 6,680 edges) *and* a populated pgvector index (1,108 chunks, both
+dimension arms, recall measured, ADR-0004 accepted).
+
+**Next action is Phase 3** — `src/query/` and `src/answer/`, which are still stubs. Two things are
+now waiting on it specifically: no Cypher template projects a relationship, so `source_chunk_id` is
+unreachable from any query; and vector retrieval scores **30% on two-hop and 47% on aggregation**
+questions, which is the gap the graph path exists to close and the baseline Phase 5 will be measured
+against. The eval question set (23 of a target 100) remains the parallel track.
 
 ## Context
 
@@ -368,7 +376,52 @@ sensible rows by eye, and re-running ingestion is a no-op.
 
 ---
 
-## Step 5 — Vector index (Phase 2)
+## ~~Step 5 — Vector index (Phase 2)~~ ✅ DONE — 1,108 chunks, both arms, ADR-0004 accepted
+
+> **Outcome.** 1,108 of 1,108 chunks embedded at 1536 **and** 512 dimensions and loaded into
+> pgvector, idempotent (re-run → identical row count and content hash). `entity_ids` populated:
+> **7,465 references across 1,107 chunks, 0 dangling** against the graph. Suite 63 → 74 (+ 13 Neo4j
+> skips). Full numbers in **`docs/metrics/vector-index.md`**.
+>
+> **Total API cost: $0.024.** Extraction was ~$24 — the embeddings are three orders of magnitude
+> cheaper, which is worth stating because the intuition runs the other way.
+>
+> **ADR-0004 resolved, but not by the rule it wrote.** 1536 scores 29/51 gold references, 512 scores
+> 28/51. The rule ("adopt 512 if it loses <2% recall") passes at 1.96% — and it should not be read as
+> a result: **the entire difference is one gold chunk in one query.** 512 was adopted on the
+> unambiguous numbers instead: **3.0× smaller index** (2.9 vs 8.8 MB) and **~8× lower latency**
+> (6.7 vs 53.4 ms p50).
+>
+> **The 8× is bigger than the 3× dimension ratio because the vectors are TOASTed** — `storage=e`,
+> heap 1.7 MB against 12 MB of TOAST, so every comparison pays an out-of-line fetch.
+>
+> **HNSW earns nothing at 1,108 rows and the sweep it was built for has no signal.** The planner
+> picks a Seq Scan every time (~6 ms exhaustive) and is right to. Forced onto the index, recall is
+> *identical* at ef_search 40/100/200 and latency is *worse*. So every recall figure here is exact
+> search — the ceiling belongs to the embedding, not the index. Left on the planner's default the
+> sweep compares three identical plans and prints a flat line that reads like tuning.
+>
+> **The number that matters is per-stratum**, and it is the project's own thesis measured before the
+> graph path exists: hard-negative 100%, single-hop 75%, cross-regulation 70%, three-hop 67%,
+> **aggregation 47%, two-hop 30%**. Vector search handles one-paragraph questions and collapses on
+> multi-hop — exactly ADR-0001's argument for a graph. Phase 5 now has a measured baseline to beat
+> rather than an assumed one.
+>
+> **All three Phase-2 defects closed, and a fourth found while closing them.** `Chunk` rejected
+> **1,000 of 1,108** rows, not the 586 of 694 recorded — that figure had counted the AI Act file
+> only and all 414 GDPR rows failed too. `schema.sql` rewritten to 11 typed columns. `entity_ids`
+> populated. And the uniqueness assertion on `citation_label` caught **`section` being computed by
+> the annex parser, used to build the chunk_id, and then dropped from the record** — 25 chunks
+> sharing 11 labels, so `AIA Annex VIII(1)` named the registration duties of three different actors.
+> Backfilled by re-deriving from source HTML with every other field asserted byte-identical
+> (0 mismatches); no re-extraction needed. Write-up in `docs/failure-notes.md`.
+>
+> **`OPEN`:** the extractor was never told the section either (`user_prompt()`'s key tuple has no
+> `section`), so the graph's Annex VIII nodes carry the same ambiguity the labels did — ~$0.70 of
+> re-extraction to fix. And `embedding_1536` is retained without a job, pending an eval set large
+> enough to resolve a 2% difference.
+
+### ~~Original plan~~ (executed, with the additions above)
 
 **Prerequisite (do first):** invert the `schemas.py` dependency. It currently re-exports from
 `extract.py`, which pulls `cohere` transitively into `src/api/app.py`. Move the ontology block into
@@ -457,7 +510,7 @@ Two notes:
 | ~~2~~ ✅ | ~~Type histograms, `INTERACTS_WITH` count, pre-seed status, dangling-ref count, and failure rate written into `docs/failure-notes.md` and the metrics doc — no more `_TBD_`~~ — all written; the three remaining `_TBD_`s are Phase 3/5 metrics, not Step 2's. Histograms regenerated during Step 4 after hand-transcription drift |
 | 3 | `deployer` / `deployers` / `the deployer referred to in Article 26(1)` resolve to one node; threshold justified by 30 labeled pairs; ADR written |
 | ~~4~~ ✅ | ~~Loader run twice → identical counts; all six Cypher templates return non-empty results in Neo4j Browser~~ — both confirmed, and both are now tests rather than manual checks; 2 of the 6 templates had to be fixed to get there |
-| 5 | `SELECT count(*) FROM chunks WHERE embedding IS NOT NULL` = 1,108; recall@10 measured at both 1536 and 512 dims; annex chunks retain provenance |
+| ~~5~~ ✅ | ~~`SELECT count(*) FROM chunks WHERE embedding IS NOT NULL` = 1,108; recall@10 measured at both 1536 and 512 dims; annex chunks retain provenance~~ — all three confirmed and now tests (`tests/test_embedder.py`), plus idempotency and the `entity_ids`→graph join. ADR-0004 *Accepted*; the recall difference between the arms turned out to be one gold chunk, so the decision rests on 3× storage and 8× latency |
 | Eval | `wc -l eval/eval-questions.jsonl` ≥ 50, every row has a non-empty gold **and gold `source_chunk_ids`**, strata match §5.3, `pytest tests/test_eval_questions.py` green |
 
 Run `pytest` after Steps 3–5; the suite is ~~currently 8 schema tests~~ **now 18 tests** in
