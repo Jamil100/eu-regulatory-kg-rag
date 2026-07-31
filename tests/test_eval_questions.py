@@ -243,6 +243,19 @@ def test_required_fields_present(rows):
         assert row["grading_rule"].strip(), f"{row['id']}: empty grading_rule"
 
 
+def test_every_row_is_verified(rows):
+    """`verified` is a human sign-off that the gold was read out of the source text,
+    not drafted from memory. An unverified row cannot score anything, so it must not
+    reach a benchmark run.
+
+    This gate landed last, on 2026-07-31, once hn-001's gold was written and signed
+    off -- shipping it earlier would only have reddened the suite on a row that was
+    known to be incomplete.
+    """
+    unverified = [r["id"] for r in rows if not r.get("verified")]
+    assert not unverified, f"unverified rows must not ship: {unverified}"
+
+
 def test_non_traversable_rows_carry_a_reason(rows):
     """xr-003/xr-004 compare AIA Art. 99 to GDPR Art. 83, which never cross-cite, so
     no article-level bridge is derivable and the hybrid has no edge over the vector

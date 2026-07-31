@@ -29,11 +29,37 @@ A change is marked `DONE` only if code in this repo enforces it.
   1.7s of that, the rest is Neo4j JVM/plan-cache warmup). See `docs/metrics/graph-load.md`.
 - Eval-set metadata defects found on first mechanical check: **10 of 23 rows** declared graph edges
   their gold chunks do not carry, and **1 row's gold chunk did not contain its own answer**
-  (`hn-001` pointed at AIA Art. 99(1), which states no figure). Golds themselves were sound — all
-  41 gold chunk ids exist and 16 spot-checked claims matched the source text.
+  (`hn-001` pointed at AIA Art. 99(1), which states no figure). Golds themselves were sound — every
+  gold chunk id existed and 16 spot-checked claims matched the source text. See
+  `docs/metrics/eval-set.md`.
 - Router misclassification rate: _TBD_
 - Citation-validation rejection rate: _TBD_
+- LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
+
+## Recurrence tracker
+
+The entries below keep reaching the same conclusion in different words, so here it is as a count.
+This table is the actual finding of this document: **the failure modes are not being retired, they
+are changing address.** Every row is aggregated from write-ups further down — nothing here is new.
+
+| Root cause | Times | Where |
+|---|---|---|
+| **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
+| **Confirmed the part I looked at, assumed it covered the whole** | **4** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article |
+| **A count mistaken for a shape** | **2** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere |
+| **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
+| **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
+
+**What the shape of this table says.** The top row is the most expensive class — three defects, all
+from the same 4,000-token artefact, none caught by a test, each found only by reading output. **The
+few-shot examples are teaching material and have never been reviewed as such.** They are treated as
+prompt filler when they are closer to executable specification.
+
+The second row is the oldest and most persistent, and it is worth noticing that it now includes a case
+from *this* document's own remedy: `definition_of` passed a non-empty test because the probe term was
+chosen from the part that worked — the identical mistake as the five hand-checked articles in the
+ingestion section, three phases later.
 
 ---
 
@@ -837,3 +863,71 @@ those declarations against reality asked a question no self-audit had asked.
 kind of change that can quietly manufacture support for whatever you were hoping to show. The only
 reason the 16 fabricated bridges did not ship is that a number measured beforehand disagreed with the
 number produced afterward.
+
+---
+
+# Three defects found while planning Phase 2, written down before they are fixed
+
+These were found on 2026-07-31 while scoping the vector index, and they are recorded now rather than
+when they are fixed. The reason is in this file's own header: an `OPEN` item that exists only in
+someone's memory of a planning conversation is not tracked, it is forgotten. All three are in Step 5's
+path and none is fixed yet.
+
+## 1. `Chunk` rejects 586 of 694 AI Act rows
+
+`src/schemas.py` declares `article: str | None` and `paragraph: str | None`. The chunker writes
+integers (`"article": 1`). Pydantic v2 does not coerce int→str, so `Chunk.model_validate` **fails on
+586 of 694 AI Act rows**.
+
+The 108 that pass are the annex chunks — and they pass only because Pydantic silently discards
+`annex`, `annex_title`, `point` and `token_count` as extra keys. So the model "accepts" them by
+throwing away exactly the fields that identify them.
+
+**Why it matters.** `embed_chunks(chunks: list[Chunk])` is the declared Step 5 entry point. It cannot
+be handed the real corpus at all. The failure is total and has been latent since the model was written.
+
+**What caught it.** Constructing `Chunk` from actual corpus rows while planning, rather than reading
+the model and the JSONL separately and assuming they matched. Nothing in the pipeline had ever done
+this: `chunker.py` writes raw dicts via `json.dumps` and never constructs a `Chunk`, so the type has
+never been exercised against the data it describes.
+
+- `OPEN` (since 2026-07-31) — Fix the field types and add a validator for the three row shapes. Add a
+  test that round-trips **all 1,108** rows through `Chunk`, so the model and the corpus cannot drift
+  apart again silently.
+
+## 2. `schema.sql` would lose provenance for 202 of 1,108 chunks
+
+`src/index/schema.sql` declares `article` and `paragraph` only. The corpus has **11 distinct keys in 3
+disjoint shapes**: 906 paragraph rows, **108 annex rows** (`annex`, `annex_title`, `point`) and
+**94 definition rows** (`definition`). Loading as written drops five keys and leaves the annex and
+definition chunks unidentifiable — 18.2% of the corpus.
+
+`article` is also declared `TEXT` where the data is integer, the same mismatch as defect 1.
+
+**Why it matters.** Annex III is the high-risk list and Annex VI/VII are the conformity procedures —
+the chunks a citation most needs to name precisely. They would be in the vector store as anonymous
+text.
+
+- `OPEN` (since 2026-07-31) — Explicit nullable columns with correct types, plus `create_indexes()`
+  split from `ensure_schema()` so HNSW is built after the bulk load rather than maintained per insert.
+
+## 3. `entity_ids TEXT[]` is declared and never populated
+
+`schema.sql` has had an `entity_ids TEXT[] DEFAULT '{}'` column since scaffolding. **No code anywhere
+writes it and no code reads it.** It is a plan recorded as a schema and never built — the same pattern
+as `docs/concepts/ontology.md`, a file referenced by ADR-0007 that has never existed in the worktree or
+in git history.
+
+The graph↔vector join runs through `chunk_id`, which is load-bearing on both sides and does work. So
+`entity_ids` is not a gap in the design; it is a vestige of a different one.
+
+- `OPEN` (since 2026-07-31) — Either populate it from the resolved graph or delete the column. A
+  schema field that is always `'{}'` is worse than no field: it reads as a feature.
+
+**What I learned from all three together.** Every one of them is a **contract that both sides agreed to
+and neither ever tested** — a Pydantic model describing a JSONL nobody validated against it, a SQL
+schema describing a corpus nobody loaded, a column describing a relationship nobody populated. They
+survived because each side was individually reasonable. This is the same shape as the
+`cross_regulation` template written against a graph nobody had loaded, and it suggests the rule: **an
+interface between two components is untested until something has actually crossed it**, and writing
+both sides carefully is not a substitute.
