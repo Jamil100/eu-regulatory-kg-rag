@@ -15,6 +15,20 @@ unreachable from any query; and vector retrieval scores **30% on two-hop and 47%
 questions, which is the gap the graph path exists to close and the baseline Phase 5 will be measured
 against. The eval question set (23 of a target 100) remains the parallel track.
 
+**Pre-Phase-3 gate closed (2026-08-02).** Every remaining housekeeping item that cost nothing but
+hand-work is done — chunker output naming, `settings` in `extract.py`, and the two tests the failure
+notes had been carrying as `OPEN` since Phase 1. Suite is **87 → 92 tests** (71 pass with both
+containers down; 21 skip on Neo4j/Postgres rather than reddening).
+
+> **One of those "cosmetic" items was not cosmetic.** Verifying the chunker filename change revealed
+> that `chunker.main()` rebuilds **1,016 of the 1,108 chunks on disk** — it never called
+> `chunk_definitions()`, so the 94 definition chunks were unreachable from the code that claims to
+> produce them. Fixed and now byte-identical; details in Housekeeping below. This is the reason to
+> read the section rather than trust the checkmark.
+Two items are **deferred, not blocked on**: the annex `section` defect and the eval set at 23/100 —
+both are described under *[Deferred into Phase 3](#deferred-into-phase-3)* below. Nothing left in
+this document gates starting `src/query/`.
+
 ## Context
 
 Ingestion and extraction code are done and well-debugged. The corpus is 1,108 chunks (694 AI Act +
@@ -480,23 +494,98 @@ Two notes:
 
 ---
 
-## Housekeeping (batch into any commit above)
+## ~~Housekeeping (batch into any commit above)~~ ✅ ALL CLOSED — 2026-08-02
 
-- `README.md:19` links to `docs/roadmap.md`; the file is `docs/kg-rag-eu-ai-act-roadmap.md`.
-- `README.md:43-45` setup commands are stale: `src.ingest.parser` → `src.ingest.chunker`,
-  `src.ingest.extractor` → `src.ingest.extract`, and `src.index.embedder` currently exits with a TODO.
-- `chunker.main()` writes a hardcoded `data/processed/chunks.jsonl`, renamed by hand after each run
-  — derive the output name from the input instead.
-- `extract.py:46` reads `os.getenv("MODEL_EXTRACT")` directly rather than importing `settings` from
-  `src/config.py`.
-- **`schemas.py` dependency inversion** — listed as a Step 5 prerequisite above; can land earlier.
-- Two OPEN items in `docs/failure-notes.md` are now cheap and worth closing: a behavioural extractor
-  test (assert `gdpr-art6-para1` yields zero `Obligation`, and the `aia-art9-para1` control still
-  yields one) and per-annex count fixtures. Both run off the existing `data/cache/extraction/`
-  responses at **zero API cost**. — **Still open.** Step 0 added endpoint/orphan checks and v3 schema
-  tests (suite 8 → 18), but neither behavioural test was written. The `aia-art9-para1` control was
-  verified *by hand* during the v3 re-run, which is exactly the "doing something once by hand is not
-  `DONE`" case the failure notes call out.
+- ~~`README.md:19` links to `docs/roadmap.md`; the file is `docs/kg-rag-eu-ai-act-roadmap.md`.~~
+  Fixed during Steps 4–5; the link now resolves.
+- ~~`README.md:43-45` setup commands are stale: `src.ingest.parser` → `src.ingest.chunker`,
+  `src.ingest.extractor` → `src.ingest.extract`, and `src.index.embedder` currently exits with a TODO.~~
+  Fixed. **Two residuals found while checking and also fixed:** the chunker line was invoked with no
+  argument, but `chunker.main()` requires exactly one and returns 2 without it — it now shows both
+  real invocations; and the `# TODO: not implemented` note on `src.index.embedder` outlived the
+  module by a whole phase (it is implemented, `--apply`, and covered by `tests/test_embedder.py`).
+- ~~`chunker.main()` writes a hardcoded `data/processed/chunks.jsonl`, renamed by hand after each run
+  — derive the output name from the input instead.~~ Done: `output_path()` +
+  `OUTPUT_SLUG_BY_REGULATION` in `chunker.py`. **Derived from the regulation, not the input stem** —
+  `eu-ai-act.html` must yield `chunks-ai-act.jsonl`, not `chunks-eu-ai-act.jsonl`. Both names are
+  hardcoded downstream (`extract.py` `CHUNK_FILES`, embedder, fixtures), so a test asserts the two
+  derived paths are exactly `CHUNK_FILES` — the derivation is only safe if it derives the same names.
+
+  > **Verifying this two-line change found a five-phase-old defect.** Running the fixed `main()`
+  > rebuilt **1,016 chunks against the 1,108 on disk**. `main()` called `chunk()` and
+  > `chunk_annexes()` but never `chunk_definitions()` — which sits in the same file, implemented and
+  > correct — so AIA Art. 3 came out as one 2,619-word blob instead of `def1…def68`, and GDPR Art. 4
+  > as one instead of 26. **The corpus could not be rebuilt from the code that builds it.** All 94
+  > definition chunks are extracted, in Neo4j, in pgvector, and cited by the eval set
+  > (`aia-art3-def37` is both a pilot chunk and a gold chunk), so a regeneration would have dropped
+  > them and stranded ~$24 of extraction keyed on text that would no longer exist.
+  >
+  > This was a live trap for the deferred annex fix below: that work is "re-extract 25 chunks", and
+  > regenerating the corpus first would have destroyed 94 others.
+  >
+  > **Fixed** — `main()` now splices definition rows in source order (`splice_definitions()`), and
+  > both files rebuild **byte-identical** to the stored corpus, verified by comparing bytes. The run
+  > summary now prints the three shapes separately rather than one total, because one total is what
+  > hid it. `tests/test_chunks.py::test_chunker_reproduces_the_stored_corpus` re-derives into
+  > `tmp_path` and compares. Full write-up in `docs/failure-notes.md` (last entry).
+  >
+  > Worth stating plainly: every other test in `test_chunks.py` passed throughout, because they all
+  > validate the stored corpus against itself. None could see it was no longer reachable from the
+  > generator.
+- ~~`extract.py:46` reads `os.getenv("MODEL_EXTRACT")` directly rather than importing `settings` from
+  `src/config.py`.~~ Done: `MODEL = settings.model_extract`, and `import os` is gone from the module.
+  **`MODEL` feeds `cache_key()`**, so this was verified as a no-op on the cache rather than assumed:
+  the probe hash and `aia-art1-para1`'s key are byte-identical before and after, and the key still
+  names a file on disk. A one-character drift here orphans 1,127 cached responses and costs ~$24.
+  The `CO_API_KEY or COHERE_API_KEY` fallback also moved into `Settings` — the extractor and the
+  embedder previously resolved the key by different rules and could pick different keys.
+- ~~**`schemas.py` dependency inversion** — listed as a Step 5 prerequisite above; can land earlier.~~
+  Done during Step 5. `src/schemas.py` owns the ontology, `extract.py` re-exports it, and
+  `src/api/app.py` imports only `src.schemas` — verified transitively `cohere`-free.
+- ~~Two OPEN items in `docs/failure-notes.md` are now cheap and worth closing: a behavioural extractor
+  test … and per-annex count fixtures. Both run off the existing `data/cache/extraction/`
+  responses at **zero API cost**.~~ ~~**Still open.**~~ **Both written 2026-08-02, zero API cost.**
+  - `tests/test_extraction_behaviour.py` — `gdpr-art6-para1` yields **0** `Obligation` (and still
+    yields `LawfulBasis`, so deleting the type cannot pass it), `aia-art9-para1` still yields one.
+    The hand-check from the v3 re-run finally leaves something behind.
+  - `EXPECTED_ANNEX_COUNTS` in `tests/test_chunks.py`, cross-checked against `EXPECTED_SHAPES`.
+    **Caveat recorded in the test:** transcribed from today's corpus, not an independent hand count,
+    so it catches regression from here — it does not re-verify the parser the way the original
+    102-vs-108 check did. Claiming otherwise would repeat the failure the notes are about.
+
+Not closed, and deliberately so: the remaining `OPEN` items in `docs/failure-notes.md` are real work,
+not housekeeping — build-time coverage check (:103), text hygiene tests (:207), production-key
+refusal (:479), `failures.jsonl` overwritten by the next `--all` (:496), oversized-paragraph
+splitting (:521), `gdpr-art70-para1` has zero edges (:788), ontology v4 `INTERACTS_WITH` (:857).
+
+---
+
+## Deferred into Phase 3
+
+Named here so Phase 3 does not silently build on them. Neither blocks starting.
+
+**1. The extractor was never told the annex `section`.** `user_prompt()` (`extract.py:302-309`)
+iterates a 7-key tuple with no `section`, so the three Annex VIII "point 1" chunks and the two Annex
+XI "point 1" chunks reach Command A with identical metadata. `Chunk.section` and `citation_label`
+were fixed in Step 5; **the extractor side was not**, so the graph's Annex VIII nodes still carry the
+ambiguity the citation labels shed. ~$0.70 to fix.
+
+> **The trap:** `cache_key()` (`extract.py:317`) hashes only model + system prompt + chunk text.
+> Adding `section` to `user_prompt()` therefore **does not invalidate the cache** — a plain `--all`
+> will replay the stale responses and report success. The 25 sectioned chunks must be re-run with
+> explicit `--chunk-id` flags. This is the good news and the bad news in one fact: the fix is cheap
+> *because* the cache is not rotated, and silent *for the same reason*.
+
+**2. The eval set is 23 of 100** (`docs/metrics/eval-set.md`) — all 23 verified, 21 scoreable, 8
+strata. The two rows with empty `source_chunk_ids` are the deliberate refusal cases, enforced by
+`tests/test_eval_questions.py`. **Parallel track; it does not gate Phase 3.** It becomes blocking at
+Phase 5, where the strata are the measurement.
+
+**3. No Cypher template projects a relationship.** This is Phase 3's own first job, not a
+prerequisite — recorded here only so it is not mistaken for done. Five of six templates return nodes
+only; `path_between` returns a `shortestPath` whose relationships are technically inside the returned
+object but which nothing unpacks. Until one projects `relationships(p)`, `source_chunk_id` — the
+pgvector join key and the citation provenance — is unreachable from any query.
 
 ---
 
@@ -505,13 +594,17 @@ Two notes:
 | Step | How you know it worked |
 |---|---|
 | ~~0~~ ✅ | ~~`PENALIZED_UNDER` edges present in `extractions.jsonl`; random-sample per-chunk cost recorded in the metrics doc~~ — both confirmed; plus ontology v3, ADR-0008, and new integrity checks |
-| 1a | `call_model` wrapped in `tenacity` retry; production key confirmed |
-| 1b | `extractions.jsonl` ≈ 1,108 lines; `failures.jsonl` line count is the real failure rate |
+| ~~1a~~ ✅ | ~~`call_model` wrapped in `tenacity` retry; production key confirmed~~ — wrapped at `extract.py:380` with `wait_exponential_jitter`, a `_note_retry` hook, and an explicit *non*-retryable list (4xx are permanent; retrying them six times just delays a run that cannot succeed). Production key confirmed by the run completing 1,107 calls |
+| ~~1b~~ ✅ | ~~`extractions.jsonl` ≈ 1,108 lines; `failures.jsonl` line count is the real failure rate~~ — 1,107 of 1,108 (the one miss is `gdpr-art70-para1`, a chunking constraint); failure rate 0.09% |
 | ~~2~~ ✅ | ~~Type histograms, `INTERACTS_WITH` count, pre-seed status, dangling-ref count, and failure rate written into `docs/failure-notes.md` and the metrics doc — no more `_TBD_`~~ — all written; the three remaining `_TBD_`s are Phase 3/5 metrics, not Step 2's. Histograms regenerated during Step 4 after hand-transcription drift |
-| 3 | `deployer` / `deployers` / `the deployer referred to in Article 26(1)` resolve to one node; threshold justified by 30 labeled pairs; ADR written |
+| ~~3~~ ✅ | ~~`deployer` / `deployers` / `the deployer referred to in Article 26(1)` resolve to one node; threshold justified by 30 labeled pairs; ADR written~~ — ADR-0009 written; 25 pairs hand-labelled, and the honest finding was that **the threshold could not be tuned because the classes do not separate** (a must-not-merge pair scores 0.753, a must-merge pair 0.423). Deterministic stages do the work; embeddings are `--embed` candidates-for-review only |
 | ~~4~~ ✅ | ~~Loader run twice → identical counts; all six Cypher templates return non-empty results in Neo4j Browser~~ — both confirmed, and both are now tests rather than manual checks; 2 of the 6 templates had to be fixed to get there |
 | ~~5~~ ✅ | ~~`SELECT count(*) FROM chunks WHERE embedding IS NOT NULL` = 1,108; recall@10 measured at both 1536 and 512 dims; annex chunks retain provenance~~ — all three confirmed and now tests (`tests/test_embedder.py`), plus idempotency and the `entity_ids`→graph join. ADR-0004 *Accepted*; the recall difference between the arms turned out to be one gold chunk, so the decision rests on 3× storage and 8× latency |
-| Eval | `wc -l eval/eval-questions.jsonl` ≥ 50, every row has a non-empty gold **and gold `source_chunk_ids`**, strata match §5.3, `pytest tests/test_eval_questions.py` green |
+| Eval — **parallel, does not gate Phase 3** | **23 of 100** (`eval/eval-questions.jsonl`). All 23 verified, 21 scoreable, 8 strata per `docs/metrics/eval-set.md`. Every row has a non-empty gold; the only two with empty `source_chunk_ids` are the deliberate `out-of-scope` / `unanswerable` refusal rows, which `tests/test_eval_questions.py` asserts *must not* cite. That file is green at 16 tests. Becomes blocking at Phase 5 |
+| Housekeeping ✅ | `pytest` green; `cache_key()` unchanged before/after the `settings` swap (probe hash and `aia-art1-para1`'s key byte-identical, and the key still names a file on disk); **`chunker.main()` rebuilds both corpus files byte-identical** — the check that found the missing-definitions defect |
 
-Run `pytest` after Steps 3–5; the suite is ~~currently 8 schema tests~~ **now 18 tests** in
-`tests/test_schemas.py` and should grow with each stage.
+Run `pytest` after each stage. The suite was ~~8 schema tests~~ ~~18 tests~~ **92 tests across 6
+files** (`test_chunks` 13, `test_extraction_behaviour` 2, `test_eval_questions` 16, plus
+`test_schemas`, `test_graph_writer`, `test_embedder`) and should keep growing. With no containers
+running: **71 pass, 21 skip** — the DB-backed tests skip rather than redden, by design
+(`tests/conftest.py`).

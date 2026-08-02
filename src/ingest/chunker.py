@@ -14,9 +14,31 @@ import sys
 from pathlib import Path
 
 from src.ingest.annex_parser import parse_annexes
-from src.ingest.parser import parse
+from src.ingest.parser import parse, parse_definitions
 
 REGULATION_BY_STEM = {"eu-ai-act": "AIA", "gdpr": "GDPR"}
+
+# The output filename is derived from the regulation, not from the input stem:
+# `eu-ai-act.html` must produce `chunks-ai-act.jsonl`, not `chunks-eu-ai-act.jsonl`.
+# These two names are hardcoded downstream (`extract.py` CHUNK_FILES, the embedder,
+# the test fixtures), so the slugs are load-bearing and must not be "tidied".
+OUTPUT_SLUG_BY_REGULATION = {"AIA": "ai-act", "GDPR": "gdpr"}
+
+# The definitions article of each regulation. It has no numbered paragraph divs,
+# so `paragraphs()`'s fallback flattens all 68 entries into one 2,619-word blob;
+# `parse_definitions()` re-reads it per entry instead. See `splice_definitions`.
+DEFINITIONS_ARTICLE_BY_REGULATION = {"AIA": 3, "GDPR": 4}
+
+PROCESSED_DIR = Path(__file__).resolve().parents[2] / "data" / "processed"
+
+
+def output_path(regulation: str) -> Path:
+    """Where the chunks for one regulation are written.
+
+    Previously hardcoded to `data/processed/chunks.jsonl`, which meant the second
+    run overwrote the first and the file had to be renamed by hand afterwards.
+    """
+    return PROCESSED_DIR / f"chunks-{OUTPUT_SLUG_BY_REGULATION[regulation]}.jsonl"
 
 
 def make_chunk_id(regulation: str, article: int, paragraph: int) -> str:
@@ -83,6 +105,19 @@ def chunk_definitions(parsed: dict, regulation: str) -> list[dict]:
     return rows
 
 
+def splice_definitions(
+    articles: list[dict], definition_rows: list[dict], definitions_article: int
+) -> list[dict]:
+    """Swap the definitions article's paragraph rows for its per-definition rows.
+
+    In place, not appended: the corpus is in source order, so `aia-art3-def1`
+    follows `aia-art2-para12` and precedes `aia-art4-para1`.
+    """
+    head = [row for row in articles if row["article"] < definitions_article]
+    tail = [row for row in articles if row["article"] > definitions_article]
+    return head + definition_rows + tail
+
+
 def chunk_annexes(annexes: list[dict], regulation: str) -> list[dict]:
     """Split parsed annex structure at the point level into chunk records.
 
@@ -137,11 +172,20 @@ def main(argv: list[str]) -> int:
         return 2
 
     articles = chunk(parse(html_path), regulation)
+    definitions_article = DEFINITIONS_ARTICLE_BY_REGULATION[regulation]
+    definition_rows = chunk_definitions(
+        parse_definitions(html_path, definitions_article), regulation
+    )
+    articles = splice_definitions(articles, definition_rows, definitions_article)
     annexes = chunk_annexes(parse_annexes(html_path), regulation)
     rows = articles + annexes
-    out_path = Path("data/processed/chunks.jsonl")
+    out_path = output_path(regulation)
     write_jsonl(rows, out_path)
-    print(f"{len(rows)} chunks ({len(articles)} article + {len(annexes)} annex) -> {out_path}")
+    paragraphs = len(articles) - len(definition_rows)
+    print(
+        f"{len(rows)} chunks ({paragraphs} paragraph + {len(definition_rows)} definition "
+        f"+ {len(annexes)} annex) -> {out_path}"
+    )
     return 0
 
 

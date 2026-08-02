@@ -43,12 +43,13 @@ docker compose up -d          # neo4j + postgres/pgvector
 # when the last WSL session closes -- keep one open, or bring it back up.
 
 # 3. Ingest
-python -m src.ingest.chunker            # EUR-Lex HTML -> paragraph chunks
+python -m src.ingest.chunker data/eu-ai-act.html   # -> chunks-ai-act.jsonl
+python -m src.ingest.chunker data/gdpr.html        # -> chunks-gdpr.jsonl
 python -m src.ingest.extract --all      # Command A extraction (~$24, 1.5-3h)
 python -m src.ingest.audit              # corpus-scale integrity report
 python -m src.ingest.entity_resolution --apply
 python -m src.ingest.graph_writer --apply --verify   # -> Neo4j
-python -m src.index.embedder            # -> pgvector (TODO: not implemented)
+python -m src.index.embedder --apply    # -> pgvector
 
 # 4. Serve
 uvicorn src.api.app:app --reload

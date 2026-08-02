@@ -18,13 +18,26 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from src.ingest.extract import CHUNK_FILES
+from src.ingest.extract import CHUNK_FILES, ROOT
 from src.schemas import Chunk
 
 # Counted from the corpus, asserted rather than described: 906 paragraph rows,
 # 108 annex rows, 94 definition rows.
 EXPECTED_TOTAL = 1108
 EXPECTED_SHAPES = {"paragraph": 906, "annex": 108, "definition": 94}
+
+# Per-annex counts, previously prose in docs/failure-notes.md. A fused annex is
+# invisible to a total: the 102-vs-108 collapse that this table is here to catch
+# was found by comparing per-annex numbers, and a coverage check ("every container
+# yields >= 1 chunk") would have passed it.
+#
+# Honest limitation: these are transcribed from the current corpus, not from an
+# independent hand count. So this guards against a *regression* from today's
+# verified output; it does not re-verify the parser against the source HTML.
+EXPECTED_ANNEX_COUNTS = {
+    "I": 20, "II": 1, "III": 8, "IV": 9, "V": 8, "VI": 4, "VII": 5,
+    "VIII": 27, "IX": 5, "X": 7, "XI": 5, "XII": 2, "XIII": 7,
+}
 
 
 @pytest.fixture(scope="module")
@@ -73,6 +86,20 @@ def test_shape_counts(chunks):
     assert counts == EXPECTED_SHAPES
 
 
+def test_per_annex_counts(chunks):
+    """A silent collapse or explosion in one annex breaks the build.
+
+    Cross-checked against EXPECTED_SHAPES so the two tables cannot drift apart:
+    if someone updates one number here they must account for the total too.
+    """
+    counts: dict[str, int] = {}
+    for chunk in chunks:
+        if chunk.annex is not None:
+            counts[chunk.annex] = counts.get(chunk.annex, 0) + 1
+    assert counts == EXPECTED_ANNEX_COUNTS
+    assert sum(EXPECTED_ANNEX_COUNTS.values()) == EXPECTED_SHAPES["annex"]
+
+
 def test_shape_rejects_an_unknown_row():
     with pytest.raises(ValidationError):
         Chunk(chunk_id="x", regulation="AIA", text="...", article=9)
@@ -115,6 +142,47 @@ def test_sectioned_annexes_keep_their_section(chunks):
     assert sum(1 for c in chunks if c.section) == 32
     # Every other annex numbers straight through and must stay unsectioned.
     assert by_id["aia-annex3-point1"].section is None
+
+
+def test_chunker_writes_the_files_everything_else_reads(chunks):
+    """`chunker.output_path()` must reproduce the two hardcoded corpus paths.
+
+    The chunker used to write one hardcoded `chunks.jsonl` that was renamed by
+    hand after each run. Deriving the name is only safe if it derives the *same*
+    name: `extract.py`'s CHUNK_FILES, the embedder and these fixtures all hardcode
+    `chunks-ai-act.jsonl` / `chunks-gdpr.jsonl`.
+    """
+    from src.ingest.chunker import output_path
+
+    assert {output_path("AIA"), output_path("GDPR")} == set(CHUNK_FILES)
+
+
+def test_chunker_reproduces_the_stored_corpus(tmp_path, monkeypatch):
+    """`main()` end-to-end must rebuild both files byte-for-byte.
+
+    It did not. `main()` called `chunk()` and `chunk_annexes()` but never
+    `chunk_definitions()`, so AIA Art. 3 came out as one 2,619-word blob instead
+    of 68 definition chunks (GDPR Art. 4: one instead of 26). The corpus on disk
+    had 1,108 rows; the documented command sequence rebuilt 1,016 of them.
+
+    Every other test in this file reads the *stored* corpus, so all of them passed
+    against a corpus the code could no longer produce. Comparing the artefact to
+    its own generator is the only check that catches that.
+    """
+    from src.ingest import chunker
+
+    monkeypatch.setattr(chunker, "PROCESSED_DIR", tmp_path)
+    for source in ("data/eu-ai-act.html", "data/gdpr.html"):
+        path = ROOT / source
+        if not path.exists():
+            pytest.skip(f"{source} not present; source HTML is needed to re-derive")
+        assert chunker.main([str(path)]) == 0
+
+    for stored in CHUNK_FILES:
+        rebuilt = tmp_path / stored.name
+        assert rebuilt.read_bytes() == stored.read_bytes(), (
+            f"{stored.name}: re-deriving from source HTML does not reproduce the corpus"
+        )
 
 
 def test_citation_labels_are_unique(chunks):

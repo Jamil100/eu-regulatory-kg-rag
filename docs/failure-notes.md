@@ -52,7 +52,7 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
 | **Confirmed the part I looked at, assumed it covered the whole** | **5** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) |
 | **A count mistaken for a shape** | **2** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere |
-| **An interface neither side ever crossed** | **3** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated |
+| **An interface neither side ever crossed** | **4** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · **`chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases** |
 | **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
 | **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
@@ -104,6 +104,11 @@ passed. They were never going to catch this — I picked them myself, from the p
   and fail if any of them produces zero chunks. **Not built yet.** An earlier version of this
   file said it was. It wasn't, and that false claim sat here through an entire second pass
   without anyone noticing. See point 4.
+  **Weakened again on 2026-08-02** — this check would also have passed the missing-definitions
+  defect (see the last entry in this file): Article 3 produced one chunk where 68 were required.
+  A zero-chunk check is the wrong shape for this failure mode three times running. What actually
+  works is comparing the rebuild to the stored corpus, which
+  `tests/test_chunks.py::test_chunker_reproduces_the_stored_corpus` now does.
 
 **What I learned.** Checking that something is *correct* tells you nothing about whether
 something is *missing*. Everything I verified was true. The 519 chunks really were correct. And
@@ -208,8 +213,14 @@ Nothing else in the run failed.
   in scratch scripts: 627 lines, unique IDs, exact schema keys, the VIII/XI section splits, text
   hygiene, and expected per-annex counts. Both passes were checked by hand and neither left
   anything behind that would catch a regression.
-- `OPEN` — Store the expected counts as a test fixture, not just as prose in this file, so a
-  silent collapse or explosion breaks the build.
+  **Mostly closed:** `tests/test_chunks.py` now covers unique IDs, exact schema keys (round-trip,
+  `extra="forbid"`), the VIII/XI section splits, and per-annex counts. **Text hygiene is still
+  untested** — that is what remains of this item.
+- `DONE` (2026-08-02) — `EXPECTED_ANNEX_COUNTS` in `tests/test_chunks.py:29` stores the counts as a
+  fixture, cross-checked against `EXPECTED_SHAPES["annex"]` so the two tables cannot drift.
+  One honest caveat recorded in the test itself: the numbers are transcribed from today's verified
+  corpus, not from an independent hand count, so it catches a *regression* from here — it does not
+  re-verify the parser against the source HTML the way the original 102-vs-108 check did.
 
 **What I learned.** The safeguard I designed after failure 1 would not have caught failure 2 —
 and I would have assumed it did. "Every container produces at least one chunk" and "every
@@ -280,10 +291,12 @@ validation failure.** Every record was schema-valid. Every record was also wrong
 - `DONE` — Re-tested the affected chunks alongside a **control chunk** (`aia-art9-para1`, a
   genuine obligation) to confirm the new permissive rule fixed the false duties without bleeding
   into real ones.
-- `OPEN` — The tests only assert that the two new types are *accepted by the schema*. Nothing
-  checks extractor **behaviour** — that a permission-bearing chunk yields no `Obligation`. A
-  regression in the prompt would be schema-valid and silent, exactly like the original bug. Needs
-  a fixture-based test on `gdpr-art6-para1` + the control chunk.
+- `DONE` (2026-08-02) — `tests/test_extraction_behaviour.py` asserts the behaviour, not just the
+  schema: `gdpr-art6-para1` yields **zero** `Obligation` (and still yields `LawfulBasis`, so
+  deleting the type would not pass it), with `aia-art9-para1` as the control that must still yield
+  one. Runs off `data/processed/extractions.jsonl`, no API calls. This closes the case where a
+  prompt regression would be schema-valid and silent — the hand-check from the v3 re-run now leaves
+  something behind.
 
 **Known limitation, left in place deliberately.** `PERMITS` records *that* a basis makes something
 lawful, but not that the bases are **alternatives** ("at least one of"). The graph shows six
@@ -685,9 +698,11 @@ exactly what happened the first time, one section above.
 **What caught it.** Reading response headers on an unrelated 400 error. Nothing was watching.
 
 **What I changed.**
-- `OPEN` — `get_client()` should report which variable it resolved and refuse to start a `--all` run
-  on a key that returns trial headers. The `or` fallback is a silent downgrade between two things
-  with very different limits. Not built.
+- `OPEN` (half done, 2026-08-02) — `get_client()` **now reports which variable it resolved**, and
+  the `CO_API_KEY or COHERE_API_KEY` fallback moved into `settings.cohere_api_key` so the extractor
+  and the embedder can no longer resolve to different keys. Still `OPEN`: **refusing** a `--all` run
+  on a key that returns trial headers. That needs a live probe of the response headers, which is a
+  different piece of work from naming the variable.
 
 **What I learned.** I marked a manual check `DONE` and it regressed before the next stage finished.
 A verification that is not in the code is not a verification, it is a memory — and this file has now
@@ -1017,3 +1032,61 @@ that argument as a column.
 And the check that found it cost one line. `assert len(set(labels)) == len(labels)` over a whole
 corpus is the cheapest class of test there is, and it is the third time in this document that a
 whole-corpus assertion has found something every targeted check passed clean.
+
+---
+
+# The corpus could not be rebuilt from the code that built it
+
+**Found 2026-08-02**, closing the pre-Phase-3 housekeeping. Not a Phase-3 defect — a Phase-1 one
+that survived five phases because nothing ever looked.
+
+**What happened.** `chunker.main()` built `chunk(parse(...)) + chunk_annexes(parse_annexes(...))`.
+It never called `chunk_definitions()`, which sits 60 lines above it in the same file and is fully
+implemented and correct. So AIA Art. 3 fell through `paragraphs()`'s no-numbered-div fallback and
+came out as a single 2,619-word blob `aia-art3-para1`, instead of `aia-art3-def1 … def68`. GDPR
+Art. 4: one blob instead of 26.
+
+Re-running the documented command sequence produced **1,016 chunks. The corpus on disk has 1,108.**
+The 92 missing rows are exactly the 94 `definition` chunks, less the two blobs that replaced them.
+
+**Why it mattered.** Everything downstream is keyed on `chunk_id`. The 94 definition chunks are
+extracted, resolved, loaded into Neo4j, embedded in pgvector, and cited by the eval set —
+`aia-art3-def37` is a `TEST_CHUNK_IDS` pilot member and a gold chunk. Rebuilding the corpus from the
+current code would have silently dropped every one of them and invalidated ~$24 of extraction whose
+cache keys are hashed on chunk *text* that would no longer exist in that form.
+
+It was also a live trap for the one deferred item: the fix for the annex `section` defect is
+"re-extract 25 chunks", and anyone starting that by regenerating the corpus first would have
+destroyed 94 others.
+
+**What caught it.** Verifying a change I had already convinced myself was cosmetic. The task was to
+stop `main()` writing a hardcoded `chunks.jsonl` and derive the filename instead — a two-line change.
+The verification step was "run it and confirm the output is byte-identical." It was not: 627 rows
+where 694 were expected. Had I checked only that the *filename* was now correct, which is all the
+change was about, this would still be sitting there.
+
+**What I changed.**
+- `DONE` — `main()` now calls `parse_definitions()` + `chunk_definitions()` and splices the rows in
+  source order via `splice_definitions()`, so `aia-art3-def1` follows `aia-art2-para12`. Both files
+  now rebuild **byte-identical** to the stored corpus. The run summary prints the three shapes
+  separately (`518 paragraph + 68 definition + 108 annex`) rather than one total, because a single
+  total is what hid this.
+- `DONE` — `tests/test_chunks.py::test_chunker_reproduces_the_stored_corpus` re-derives both files
+  into `tmp_path` and compares bytes. This is the check that was missing, not another assertion
+  about the corpus.
+- `DONE` — `README.md` now shows both invocations with their required argument. The old line was
+  `python -m src.ingest.chunker` with no path, which exits 2 — so the documented pipeline could not
+  have been run end-to-end by anyone, which is presumably why nobody noticed the output was short.
+
+**What I learned.** Every other test in `test_chunks.py` reads `data/processed/*.jsonl` and asserts
+against it — 1,108 rows, all shapes, per-annex counts, unique citation labels, full round-trip. They
+are good tests and all of them passed, because **they all validate the artefact against itself.**
+None of them could see that the artefact was no longer reachable from the code that claims to
+produce it.
+
+This is the "interface neither side ever crossed" pattern again, but the two sides are further apart
+than before: not a model and a file, but *a generator and its own output*. The stored corpus had
+quietly become a hand-maintained asset. And note which safeguard would have missed it — the coverage
+check still `OPEN` at the top of this file, "every top-level container produces at least one chunk,"
+passes cleanly here. Article 3 produced a chunk. It produced one instead of 68. That is the third
+time in this document that a presence check has been asked to do a counting check's job.

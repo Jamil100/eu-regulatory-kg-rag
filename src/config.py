@@ -10,7 +10,11 @@ load_dotenv()
 
 
 class Settings:
-    cohere_api_key: str = os.getenv("COHERE_API_KEY", "")
+    # Both spellings are accepted because the extractor has always read CO_API_KEY
+    # first. Resolving them in one place keeps `get_client()` and the embedder from
+    # picking different keys when both variables are set.
+    cohere_api_key: str = os.getenv("CO_API_KEY") or os.getenv("COHERE_API_KEY", "")
+    cohere_api_key_var: str = "CO_API_KEY" if os.getenv("CO_API_KEY") else "COHERE_API_KEY"
 
     neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")

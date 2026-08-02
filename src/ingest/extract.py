@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -41,6 +40,7 @@ from tenacity import (
 # contracts without dragging `cohere` in behind them. Re-exported here because
 # the ingest-side modules (audit, entity_resolution, graph_writer) and the tests
 # already import these names from this module.
+from src.config import settings
 from src.schemas import (  # noqa: F401 -- re-export
     ALLOWED_ENDPOINTS,
     ENTITY_TYPES,
@@ -67,7 +67,11 @@ EXTRACTIONS_PATH = ROOT / "data" / "processed" / "extractions.jsonl"
 FAILURES_PATH = ROOT / "data" / "processed" / "failures.jsonl"
 CACHE_DIR = ROOT / "data" / "cache" / "extraction"
 
-MODEL = os.getenv("MODEL_EXTRACT", "command-a-03-2025")
+# Read through src/config.py rather than os.getenv, so the model string has one
+# source. It feeds cache_key() below: if this ever resolves to a different string,
+# all 1,127 cached responses are orphaned and a full re-run costs ~$24. The default
+# in Settings is deliberately the same literal that used to be here.
+MODEL = settings.model_extract
 
 # 4096 truncated exactly 3 of 1108 chunks -- long enumerated task lists (AIA
 # Art. 66, GDPR Art. 57 and 70) whose JSON was cut mid-string and then failed to
@@ -341,10 +345,13 @@ def cache_store(key: str, record: dict) -> None:
 
 
 def get_client() -> cohere.ClientV2:
-    api_key = os.getenv("CO_API_KEY") or os.getenv("COHERE_API_KEY")
-    if not api_key:
+    if not settings.cohere_api_key:
         sys.exit("CO_API_KEY (or COHERE_API_KEY) is not set. Put it in .env or the environment.")
-    return cohere.ClientV2(api_key=api_key)
+    # Say which variable won. With two accepted spellings, a stale CO_API_KEY
+    # silently shadowing a good COHERE_API_KEY looks like an account problem
+    # rather than a config one.
+    print(f"[cohere] key from {settings.cohere_api_key_var}", file=sys.stderr)
+    return cohere.ClientV2(api_key=settings.cohere_api_key)
 
 
 # Transient failures worth waiting out. Deliberately does NOT include
