@@ -27,6 +27,7 @@ __all__ = [
     "Extraction",
     "Chunk",
     "ChunkShape",
+    "ContextDoc",
     "Citation",
     "AskRequest",
     "AskResponse",
@@ -227,6 +228,34 @@ class Chunk(BaseModel):
                 return f"{self.regulation} Art. {self.article}({self.definition})"
             case _:
                 return f"{self.regulation} Art. {self.article}({self.paragraph})"
+
+
+# --------------------------------------------------------------------------
+# Query/answer path (Phase 3) -- a document on its way into a prompt, not a
+# corpus row. See docs/adr/adr-0011-context-document-model.md for why this is
+# not a wider Chunk: Chunk is extra="forbid" because a previous version of it
+# silently accepted 108 malformed rows by dropping the fields that identified
+# them, and a retrieval score or a rendered graph statement is not a field a
+# corpus chunk can grow without repeating that mistake in the other direction.
+# --------------------------------------------------------------------------
+
+
+class ContextDoc(BaseModel):
+    """One retrieved-or-derived document, from either path, ready to be scored,
+    reranked, deduped, and handed to Command A's `documents` parameter.
+
+    `chunk_id` and `citation_label` are always real corpus identifiers, even for
+    a GRAPH document -- a rendered graph statement is provenance-bearing prose
+    built from one or more chunks, not a free-floating fact, and `path_to_prose`
+    is responsible for keeping that true.
+    """
+
+    chunk_id: str
+    text: str
+    citation_label: str
+    source: Literal["GRAPH", "PASSAGE"]
+    score: float | None = None
+    derived: bool = False  # ADR-0010: built from an inferred edge, not an asserted one
 
 
 # --------------------------------------------------------------------------

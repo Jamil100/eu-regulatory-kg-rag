@@ -1,7 +1,7 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** planned 2026-08-02, not started. **Next action is Step 0** — resolve the three interface
-conflicts the stubs carry, because every later step consumes the answer.
+**Status:** Step 0 done (2026-08-02). **Next action is Step 1** — bring Neo4j up (it is down as of
+this writing) and project relationships from the Cypher templates.
 
 **Scope.** Roadmap Phase 3 (router + graph query path) *and* Phase 4 (path-to-prose, grounded
 generation, citation validation), which the roadmap puts in the same week under one exit criterion:
@@ -59,7 +59,25 @@ templates exist as a fixed library.
 
 ---
 
-## Step 0 — Resolve three interface conflicts before writing any code
+## ~~Step 0 — Resolve three interface conflicts before writing any code~~ ✅ DONE
+
+> **Outcome.** All three resolved. `ContextDoc` added to `src/schemas.py`; `retrieve`, `rerank`,
+> `path_to_prose`, `assemble` widened to use it; `Chunk` byte-unchanged apart from the new sibling
+> class. `PRICES` + `price_of()` added to `src/config.py`. ADR-0011 written. Suite **92 → 102 tests**
+> (10 new: 4 on `ContextDoc`, 6 on `price_of`); **81 pass / 21 skip** with no containers running —
+> the 10 new tests all pass, zero regressions.
+>
+> **The rerank price is `None`, not a number.** Cohere's public pricing page has moved Rerank 3.5 to
+> an hourly "Model Vault" rate ($5/hr) with no visible per-search or per-token figure — the two
+> numbers this repo already trusts (Command A $2.50/$10 per 1M, Embed v4 $0.12/1M) came from
+> `extract.py` and `embedder.py`, and Command R7B's $0.0375/$0.15 per 1M is the roadmap's own
+> citation, not independently re-priced. Guessing a rerank figure would have been indistinguishable
+> from a measured one inside `cost_usd`. `price_of()` returns `None` and the plan requires it to
+> propagate rather than default to zero — Step 4 must replace it with an actual measured bill.
+>
+> **Scope held at three.** `router.py` and `entity_linker.py` were read again while auditing for
+> other `Chunk`-typed conflicts; neither has one (`route() -> Route` and `link() -> list[str]` return
+> plain types), so they were left untouched, as the plan specified.
 
 The stubs were written in Phase 0, before the graph, the index, or the corpus existed. Three of their
 signatures cannot be honoured as declared. Settling them first is not tidiness: Steps 1–7 all consume
@@ -401,7 +419,7 @@ Named so Phase 3 does not silently build on them.
 
 | Step | How you know it worked |
 |---|---|
-| 0 | `ContextDoc` exists in `src/schemas.py`; `Chunk` is byte-unchanged; the four widened signatures typecheck; ADR-0011 written; a price table exists next to the model names |
+| ~~0~~ ✅ | ~~`ContextDoc` exists in `src/schemas.py`; `Chunk` is byte-unchanged; the four widened signatures typecheck; ADR-0011 written; a price table exists next to the model names~~ — all confirmed; 10 new tests (`test_schemas.py`, `test_config.py`), suite 92 → 102, 81 pass / 21 skip |
 | 1 | All six templates return provenance **and** the six baseline row counts are unchanged — `obligations_for_system('high risk ai system')` still exactly **169**; `graph-load.md` §Open bullet 1 closed |
 | 2 | Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created |
 | 3 | Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled |

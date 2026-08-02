@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from src.schemas import Chunk
+from src.schemas import ContextDoc
 
 
-def rerank(question: str, candidates: list[Chunk], top_n: int = 5) -> list[Chunk]:
-    """Rerank retrieved candidates with Rerank 3.5."""
+def rerank(question: str, candidates: list[ContextDoc], top_n: int = 5) -> list[ContextDoc]:
+    """Rerank retrieved candidates with Rerank 3.5.
+
+    ContextDoc, not Chunk (ADR-0011) -- the input already carries retrieve()'s
+    similarity score, and the output's score should become the rerank score,
+    not silently retain a similarity number a caller could mistake for it.
+    """
     raise NotImplementedError

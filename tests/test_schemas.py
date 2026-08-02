@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.ingest.extract import ALLOWED_ENDPOINTS, endpoint_violations, orphan_entities
-from src.schemas import Entity, Extraction, Relationship
+from src.schemas import Chunk, ContextDoc, Entity, Extraction, Relationship
 
 
 def test_entity_valid_type():
@@ -156,3 +156,45 @@ def test_orphan_entities_found():
         [("IMPOSES", "AIA Art. 99(4)", "comply")],
     )
     assert orphan_entities(x) == ["AIA Art. 16"]
+
+
+# --------------------------------------------------------------------------
+# ContextDoc (ADR-0011) -- a query/answer document is not a corpus row
+# --------------------------------------------------------------------------
+
+
+def test_context_doc_passage_carries_a_score():
+    d = ContextDoc(
+        chunk_id="aia-art9-para1", text="...", citation_label="AIA Art. 9(1)",
+        source="PASSAGE", score=0.83,
+    )
+    assert d.source == "PASSAGE"
+    assert d.score == 0.83
+    assert d.derived is False
+
+
+def test_context_doc_graph_statement_needs_no_score_but_keeps_provenance():
+    """A rendered graph statement has no similarity score, but it must still
+    name the chunk(s) that asserted it -- provenance is what makes it citable."""
+    d = ContextDoc(
+        chunk_id="aia-art26-para9", text="...", citation_label="AIA Art. 26(9)",
+        source="GRAPH", derived=True,
+    )
+    assert d.score is None
+    assert d.derived is True
+    assert d.chunk_id and d.citation_label
+
+
+def test_context_doc_rejects_unknown_source():
+    with pytest.raises(ValidationError):
+        ContextDoc(chunk_id="x", text="...", citation_label="x", source="WEB")
+
+
+def test_context_doc_is_not_chunk():
+    """Chunk stays extra='forbid' and unaware of ContextDoc's fields -- the two
+    describe different things and a corpus row must not silently grow a score."""
+    with pytest.raises(ValidationError):
+        Chunk(
+            chunk_id="aia-art9-para1", regulation="AIA", text="...",
+            article=9, paragraph=1, score=0.83,
+        )
