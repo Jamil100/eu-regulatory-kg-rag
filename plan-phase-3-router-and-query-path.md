@@ -1,8 +1,8 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** Steps 0–2 done (2026-08-02, 2026-08-03, 2026-08-03). **Next action is Step 3** — the
-router, measured as Command R7B against a deterministic baseline. Step 2's linked-entity count is one
-of that baseline's rules, and is now available: `link_detailed()` returns node names with types.
+**Status:** Steps 0–3 done (2026-08-02, 2026-08-03). **Next action is Step 4** — the vector path,
+retriever + reranker. The router is deterministic and adopted (ADR-0012), so `/ask` contributes $0.00
+and ~3.5 ms before retrieval starts and the whole per-query cost belongs to embed, rerank and generate.
 
 **Scope.** Roadmap Phase 3 (router + graph query path) *and* Phase 4 (path-to-prose, grounded
 generation, citation validation), which the roadmap puts in the same week under one exit criterion:
@@ -303,7 +303,47 @@ rows with **no new hand-labelling**, and it is a genuine cross-check rather than
 
 ---
 
-## Step 3 — Router: Command R7B measured against a deterministic baseline
+## ~~Step 3 — Router: Command R7B measured against a deterministic baseline~~ ✅ DONE
+
+> **Outcome.** Rules adopted, **21 / 22** at **$0.00** and **3.5 ms** p50. Command R7B scored
+> **10 / 22** — *below the majority-class constant* `always-vector` at **13 / 22** — and failed the
+> pre-registered hard gate by routing `xr-004` to `graph`. ADR-0012 records the adoption and the
+> loser's full numbers. Suite **159 → 197 tests** (4 in `test_eval_questions.py`, 34 in the new
+> `tests/test_router.py`); **197 pass / 0 skip**. `failure-notes.md` Router misclassification rate
+> filled at **4.5%**.
+>
+> **R7B returned `both` for 0 of 23 questions.** Not rarely — never: 15 `vector`, 8 `graph`, zero
+> unparseable, zero errors. 9 of the 22 scored rows are gold `both`, so the missing class capped it at
+> 13/22 before any judgement was made. Caught by printing the raw-output *distribution* beside the
+> accuracy; 45% on a three-way task reads as a weak-but-working classifier and would have been written
+> down as one. A second system prompt built specifically to attack the collapse — an ordered decision
+> procedure testing `both` first and naming it the most common case — moved it **not at all** (`both`
+> still 0 of 23, accuracy still 10 of 23, one answer newly unparseable). The rejected prompt is in
+> ADR-0012 verbatim.
+>
+> **The plan's own "strong rule" fires on nothing.** *"A question that links to zero nodes has no graph
+> path available"* is R1, and it fired **0 times** — Step 2 had already measured the link rate at 23 of
+> 23 and written it into `query-path.md`, the file this step cites. The rule that actually carries
+> those rows is **R2**: a question can link to five real nodes and still have nothing to traverse from,
+> because `Regulation`, `DefinedTerm`, `Authority` and `Penalty` are not parameters any template
+> declares. R1 is kept as a request-path guard with a test asserting its inertness, so a linker
+> regression makes it load-bearing loudly.
+>
+> **The rules' 95% is in-sample and is labelled so everywhere it appears.** They were authored with all
+> 23 gold labels visible; R7B saw none of them, and a test asserts no few-shot example is an eval
+> question. What survives the asymmetry is the gate failure and the missing class, neither of which is
+> an accuracy question. The single rules miss, `th-004`, is left unrepaired: the obvious fix moves
+> `oos-002` the wrong way.
+>
+> **Scope notes.** `Route` moved to `src/schemas.py`, where `AskResponse` had been spelling the same
+> three values a second time with nothing pinning them together. The sweep artifact is
+> `eval/router-eval.jsonl` and not under `data/`, which `.gitignore` excludes wholesale — tests and the
+> metrics doc read their numbers from it with no API key and no spend. The append-only decision log
+> (`src/query/decision_log.py`) closes the shape of `failure-notes.md` §3 for one file. Two gold labels
+> (`ag-001`, `ag-003`) override the mechanical seed and carry a `route_reason`; a test refuses a silent
+> override.
+
+## Step 3 — Router: Command R7B measured against a deterministic baseline (original)
 
 The roadmap specifies R7B and makes the small-model choice a cost-engineering signal. This project
 has also twice found the deterministic stage beat the model — ADR-0009 is an entire ADR about the
@@ -491,7 +531,7 @@ Named so Phase 3 does not silently build on them.
 | ~~0~~ ✅ | ~~`ContextDoc` exists in `src/schemas.py`; `Chunk` is byte-unchanged; the four widened signatures typecheck; ADR-0011 written; a price table exists next to the model names~~ — all confirmed; 10 new tests (`test_schemas.py`, `test_config.py`), suite 92 → 102, 81 pass / 21 skip |
 | ~~1~~ ✅ | ~~All six templates return provenance **and** the six baseline row counts are unchanged — `obligations_for_system('high risk ai system')` still exactly **169**; `graph-load.md` §Open bullet 1 closed~~ — all confirmed live; 36 new tests (`test_graph_query.py`), suite 102 → 138, 0 skipped with containers up / 14 pass + 22 skip with them down |
 | ~~2~~ ✅ | ~~Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created~~ — all confirmed; precision **52%** (64% excl. instruments) with recall reported as a labelled lower bound after the denominator was measured at 18.9 nodes/row; **38/38** linked names live in Neo4j; 21 new tests, suite 138 → **159**, 0 skipped with containers up |
-| 3 | Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled |
+| ~~3~~ ✅ | ~~Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled~~ — all confirmed; rules **21/22** adopted over R7B **10/22**, which also lost to the majority-class constant (**13/22**) and failed the pre-registered gate; R7B emitted `both` **0 of 23** times under two prompts; 38 new tests, suite 159 → **197**, 0 skipped with containers up |
 | 4 | Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed |
 | 5 | Template selection measured against `ontology_edges`; prose uses `display_name`; every graph statement carries ≥1 `source_chunk_id`; derived edges identifiable in output |
 | 6 | Every cited `chunk_id` provably ∈ retrieved set; regenerate-once path exercised by a test, not by hope; `_TBD_` at `failure-notes.md:40` filled |

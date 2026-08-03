@@ -46,7 +46,12 @@ A change is marked `DONE` only if code in this repo enforces it.
   against gold-chunk `entity_ids` is **10%** and is a **lower bound fixed by arithmetic** — that
   denominator averages 18.9 nodes per row against 3.6 links per question. See
   `docs/metrics/query-path.md`.
-- Router misclassification rate: _TBD_
+- Router misclassification rate: **4.5%** (1 of 22 gold-labelled rows) for the adopted
+  deterministic router. Command R7B, measured on the same rows under the same pre-registered
+  criterion, misclassified **55%** (12 of 22) and returned `both` for **0 of 23** questions under
+  two different system prompts — below the majority-class constant (`always-vector`, 41% error).
+  The 4.5% is **in-sample**: the rules were authored with the gold labels visible. See
+  `docs/adr/adr-0012-router-model-vs-rules.md`.
 - Citation-validation rejection rate: _TBD_
 - LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
@@ -61,7 +66,7 @@ are changing address.** Every row is aggregated from write-ups further down — 
 |---|---|---|
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
 | **Confirmed the part I looked at, assumed it covered the whole** | **6** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · **`_trim` verified against corpus names, reused on questions — no legal name ends in `?`** |
-| **A count mistaken for a shape** | **2** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere |
+| **A count mistaken for a shape** | **3** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere · **Command R7B at 45% accuracy — a weak-but-working classifier by the count, and by the distribution a three-way classifier that emitted `both` 0 of 23 times** |
 | **An interface neither side ever crossed** | **4** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · **`chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases** |
 | **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
 | **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
@@ -1264,3 +1269,76 @@ looks like a result.** A 10% recall figure is a perfectly plausible bad-linker n
 output distinguishes it from a bad linker except computing what the denominator actually contains
 first — which took one command and would not have been run if the plan's metric had been adopted as
 written.
+
+---
+
+# Phase 3 Step 3: the model used two of its three labels, and the rule I was told was strong fired never
+
+Written 2026-08-03, building the query router — the stage the roadmap most specifically predicted the
+answer for.
+
+**What happened.** Command R7B, few-shot prompted with two examples of each of `graph`, `vector` and
+`both`, returned `both` for **0 of 23** questions. Not rarely. Never. It answered `vector` 15 times and
+`graph` 8 times, with zero unparseable outputs and zero API errors — a clean, confident, well-formed
+run that had silently stopped being a three-way classifier.
+
+**Why it mattered.** 9 of the 22 scored rows are gold `both`, so the missing class capped R7B at 13/22
+before a single judgement was made. It finished at **10/22 (45%)**, below the majority-class constant
+`always-vector` at **13/22 (59%)**. A model that cannot beat "always guess the most common label" is
+not a cheap classifier, it is an expensive coin.
+
+**What caught it.** Not the accuracy number — 45% on a three-way task reads as a weak-but-working
+classifier, which is exactly what I would have written down. It was printing the **distribution of raw
+outputs** next to the accuracy. One `collections.Counter` over the artifact showed `{'vector': 15,
+'graph': 8}` and the shape of the failure was immediately a different thing from its size.
+
+This is the recurrence tracker's "a count mistaken for a shape", third occurrence, and the first where
+the count was of a *model's* behaviour rather than the data's. `INTERACTS_WITH` at 130 edges with 0 of
+them article-level is the same defect: an aggregate that looks like partial success sitting on top of
+a distribution with a whole category missing.
+
+**What I changed.** I gave the model a fair second attempt, and the rule for what counts as fair is
+worth stating because it is easy to cheat here. The collapse is visible from the **output distribution
+alone** — no gold label is needed to notice a three-way classifier using two classes — so repairing it
+is a legitimate fix rather than fitting to the answers. Rewriting the prompt as an ordered decision
+procedure that tests `both` **first** and tells the model it is the most common case produced: `both`
+still **0 of 23**, accuracy still 10 of 23, the gate failure unchanged, and one answer newly
+unparseable. Recorded in ADR-0012, including the rejected prompt verbatim.
+
+**The second finding, and it is about my own plan.** The plan for this step asserted: *"A question that
+links to zero nodes has no graph path available; that alone is a strong rule."* It fires on **zero of
+23 rows**, because Step 2 had already measured the link rate at **23 of 23** and written it into
+`docs/metrics/query-path.md` — the number that falsified the rule was in the repo, in the file the plan
+cites, before the plan was written. The rule that actually carries those rows is a different one: a
+question can link to five real nodes and still have nothing to traverse from, because `Regulation`,
+`DefinedTerm`, `Authority` and `Penalty` are not parameters any template declares.
+
+- `DONE` R1 is kept as a genuine request-path guard and `test_r1_is_inert_on_this_eval_set` asserts the
+  inertness, so a linker regression makes it load-bearing **loudly** rather than silently.
+- `DONE` The adoption criterion — accuracy, a ≤1-row tie band, and a hard gate on
+  `graph_traversable: false` rows — was written into the module docstring **before** the sweep ran.
+  Both the tie band and the gate ended up load-bearing, and deciding either afterwards would have been
+  indistinguishable from picking the winner first.
+- `DONE` Two constant arms (`always-vector`, `always-both`) are in the table permanently. Without them
+  R7B's 45% is "worse than rules"; with them it is "worse than not classifying", which is the true
+  statement and the one that decided the ADR.
+- `DONE` The rules' 95% is labelled **in-sample** everywhere it appears — module docstring, CLI output,
+  metrics doc, ADR — because the rules were authored with all 23 gold labels visible and R7B saw none
+  of them. A test asserts no few-shot example is an eval question; nothing can assert the rules were
+  not fitted, so it is disclosed instead.
+- `DONE` `failures.jsonl`'s lesson (§3 above) is finally acted on for one file: `decision_log.append`
+  opens `"a"`, flushes and fsyncs per row, and a test writes two runs and asserts the first survives.
+- `OPEN` Everything here is in-sample. The 100-row eval set is the only thing that resolves it, and the
+  honest prior is that 95% falls.
+- `OPEN` `th-004` is a recorded rules miss, unrepaired. The obvious fix moves `oos-002` the wrong way,
+  and one row is not enough evidence to add a rule.
+
+**What I learned.** I have been writing "measure the thing before building on it" in these notes for
+five phases, and I still only measured the *aggregate*. The distribution was one line of code away the
+whole time and it is the line that produced the finding. An accuracy figure tells you how often a
+classifier is wrong; only the output distribution tells you whether it is a classifier.
+
+The smaller lesson is sharper because it is self-inflicted: **the plan asserted a rule was strong and
+the number disproving it was already in the repo, in the file the plan cited two sections earlier.**
+Deriving a design from a document is not the same as checking it against the document, and the gap
+between those is where the last three of these entries have lived.

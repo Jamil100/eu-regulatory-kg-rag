@@ -21,6 +21,7 @@ import pytest
 
 from eval.run_benchmark import QUESTIONS, load_questions
 from src.ingest.extract import CHUNK_FILES, RelationType
+from src.schemas import Route
 
 # `must_cite` and "has gold chunks" per stratum. The three refusal modes differ, and
 # the difference is the point: out-of-scope and unanswerable must cite NOTHING, while
@@ -39,6 +40,22 @@ KNOWN_STRATA = {
 }
 
 HOPS_BY_STRATUM = {"out-of-scope": {0, 1}, "unanswerable": {0, 1}, "hard-negative": {0, 1}}
+
+
+def _seed_route(row: dict) -> str:
+    """The route a purely mechanical derivation would produce.
+
+    Phase 3 Step 3 labels `route` by hand, and this is the derive half of
+    derive-then-verify: it is *not* the gold label, it is the thing the gold label
+    is checked against so that a hand judgement has to be stated rather than
+    silently absorbed. 21 of 23 rows agree with it; the two that do not carry a
+    `route_reason` saying why, which is the only reason this function exists.
+    """
+    if row.get("graph_traversable") is False:
+        return "vector"
+    if not row["ontology_edges"]:
+        return "vector"
+    return "both" if row["hops"] >= 2 else "vector"
 
 
 @pytest.fixture(scope="module")
@@ -234,6 +251,7 @@ def test_required_fields_present(rows):
     required = {
         "id", "stratum", "hops", "question", "gold", "citations",
         "source_chunk_ids", "grading_rule", "ontology_edges", "must_cite", "verified",
+        "route",
     }
     for row in rows:
         missing = required - set(row)
@@ -265,3 +283,66 @@ def test_non_traversable_rows_carry_a_reason(rows):
             assert row.get("graph_traversable_reason", "").strip(), (
                 f"{row['id']}: graph_traversable=false needs a reason"
             )
+
+
+# --------------------------------------------------------------------------
+# Router gold labels (Phase 3 Step 3)
+# --------------------------------------------------------------------------
+
+def test_routes_are_known(rows):
+    """`route` is what the router is scored against, so an unknown value there
+    would be counted as a misroute forever rather than as a typo."""
+    valid = set(get_args(Route))
+    for row in rows:
+        assert row["route"] in valid, (
+            f"{row['id']}: route {row['route']!r} is not one of {sorted(valid)}"
+        )
+
+
+def test_non_traversable_rows_route_to_vector(rows):
+    """Two independent readings reached this conclusion and neither was in code.
+
+    The eval author read the law and set `graph_traversable: false` on xr-003 and
+    xr-004 (AIA Art. 99 and GDPR Art. 83 never cross-cite). Step 2's linker, working
+    only from the graph, then reached nothing those rows' gold chunks assert. A
+    router that sends either row to `graph` is wrong for a reason this repo has
+    already established twice, so it is asserted rather than left to the gold label.
+    """
+    for row in rows:
+        if row.get("graph_traversable") is False:
+            assert row["route"] == "vector", (
+                f"{row['id']}: graph_traversable=false but route={row['route']!r}"
+            )
+
+
+def test_route_overrides_carry_a_reason(rows):
+    """A hand label that contradicts the mechanical seed must say why.
+
+    Without this, `route` degrades into an unfalsifiable field: any router result
+    could be accommodated by quietly moving a label. Same shape as
+    test_non_traversable_rows_carry_a_reason -- a negative needs a stated reason.
+    """
+    for row in rows:
+        if row["route"] != _seed_route(row):
+            assert row.get("route_reason", "").strip(), (
+                f"{row['id']}: route={row['route']!r} overrides the seed "
+                f"{_seed_route(row)!r} and carries no route_reason"
+            )
+
+
+def test_route_labels_are_not_a_single_class(rows):
+    """The measurement is only meaningful if a constant router cannot win it.
+
+    Necessity labelling was adopted knowing it might make one class dominant; the
+    agreed mitigation was to report an `always-<mode>` arm as the majority-class
+    baseline. This pins the number that arm scores, so a later relabelling that
+    quietly makes the task trivial shows up here rather than as a flattering
+    router accuracy.
+    """
+    counts = collections.Counter(r["route"] for r in rows)
+    assert len(counts) == 3, f"all three routes must appear as gold: {dict(counts)}"
+    majority = counts.most_common(1)[0][1] / len(rows)
+    assert majority < 0.60, (
+        f"majority class is {majority:.0%} of rows ({dict(counts)}); a constant "
+        f"router would score that, and the comparison stops meaning anything"
+    )

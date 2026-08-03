@@ -28,6 +28,8 @@ __all__ = [
     "Chunk",
     "ChunkShape",
     "ContextDoc",
+    "Route",
+    "ROUTES",
     "Citation",
     "AskRequest",
     "AskResponse",
@@ -262,6 +264,17 @@ class ContextDoc(BaseModel):
 # API contracts
 # --------------------------------------------------------------------------
 
+# The router's output enum. It lives here rather than in `src/query/router.py`
+# because `AskResponse` has to name the same three values and previously spelled
+# them out a second time, with nothing pinning the two lists to each other. A
+# route added to the router and not to the response -- or the reverse -- would
+# have typechecked. `router.py` re-exports this name; the dependency runs that
+# way round because nothing in `src.schemas` may import from `src.query`, for the
+# same reason the module docstring gives for `src.ingest`.
+Route = Literal["graph", "vector", "both"]
+ROUTES: frozenset[str] = frozenset(get_args(Route))
+
+
 class Citation(BaseModel):
     chunk_id: str
     start: int
@@ -276,6 +289,6 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     citations: list[Citation] = Field(default_factory=list)
-    route: Literal["graph", "vector", "both"]
+    route: Route
     latency_ms: float
     cost_usd: float
