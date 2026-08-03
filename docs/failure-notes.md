@@ -29,6 +29,10 @@ A change is marked `DONE` only if code in this repo enforces it.
 - Cypher templates broken on first contact with a real graph: **3 of 6** — one returned zero rows,
   one was a cartesian product, one silently missed 48 of 337 defined terms. Plus **1** row-count
   defect from parallel edges (24,428 rows where 169 were correct).
+- Cypher templates broken by the Phase 3 provenance rewrite: **0 of 6** — all six row counts
+  (60 / 169 / ≥1 / 1 / 4 / 1-path) unchanged, measured on the live graph before *and* after. The one
+  defect the rewrite did contain was caught by a probe before any template was written; see the
+  Phase 3 Step 1 entry.
 - Graph load wall-clock: **2.7–3.1s warm, 9.4s cold** (3,366 nodes + 6,680 edges; the graph write is
   1.7s of that, the rest is Neo4j JVM/plan-cache warmup). See `docs/metrics/graph-load.md`.
 - Eval-set metadata defects found on first mechanical check: **10 of 23 rows** declared graph edges
@@ -56,6 +60,7 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
 | **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
+| **A container non-empty because of its shape, not its content** | **1** | `collect(DISTINCT {chunk: rel.source_chunk_id})` on a missed `OPTIONAL MATCH` returns `[{chunk: null}]`, not `[]` — one fake citation that passes every `if provenance:` check. **Caught by a probe before it was written**, which is the only reason the count is 1 and not a defect |
 
 **What the shape of this table says.** The top row is the most expensive class — three defects, all
 from the same 4,000-token artefact, none caught by a test, each found only by reading output. **The
@@ -1090,3 +1095,84 @@ quietly become a hand-maintained asset. And note which safeguard would have miss
 check still `OPEN` at the top of this file, "every top-level container produces at least one chunk,"
 passes cleanly here. Article 3 produced a chunk. It produced one instead of 68. That is the third
 time in this document that a presence check has been asked to do a counting check's job.
+
+---
+
+# Phase 3 Step 1: the templates survived, and the defect was in the fix
+
+Written 2026-08-03, projecting relationship provenance out of the six Cypher templates.
+
+**What happened.** Nothing broke. All six templates were rewritten to return the `source_chunk_id` of
+every edge they traverse, and all six row counts came back identical — 60 / 169 / 1 / 1 / 4 /
+1-path-2-hops, measured on the live graph before the change and again after. Against this document's
+own base rate of **3 of 6 broken on first contact**, that deserves an explanation rather than a
+victory lap, and the explanation is dull: the graph was brought up and the templates were run *first*,
+so the rewrite was aimed at observed behaviour instead of assumed behaviour. That is precisely the
+remedy the Step 4 entry above prescribed, applied on purpose.
+
+**The one real defect was in the fix, and it was found by probing rather than by testing.** The
+natural way to carry provenance is a map per edge — chunk id, `derived` flag, direction — collected
+per row:
+
+```cypher
+collect(DISTINCT {chunk: pu.source_chunk_id, derived: pu.derived}) AS penalty_chunks
+```
+
+On a leg that matched, this is correct. On a **missed `OPTIONAL MATCH`** it returns
+
+```
+[{'chunk': None, 'derived': None}]
+```
+
+where collecting the bare property returns `[]`. `collect` drops nulls, but a map literal is never
+null — only its values are. The result is a provenance list of length 1 containing a citation to
+nothing, and **every reasonable check passes it**: it is a non-empty list, `if provenance:` is true,
+"every row carries provenance" holds. Only citation validation two steps later would have caught it,
+as a chunk id that resolves to no chunk — assuming it did not simply skip the null.
+
+This matters here more than it would elsewhere because `enforcement_chain`'s OPTIONAL leg is the
+*common* case, not the edge case: only **4 of 216** enforced obligations also carry
+`PENALIZED_UNDER`. The failure mode would have been the default.
+
+**What caught it.** A 40-line throwaway script run against the live graph before a single template was
+edited, which checked the two Cypher claims the plan was reasoning about but had not observed: that
+aggregating inside `collect()` leaves the row count alone, and what happens to a map literal on a
+null leg. The first claim was confirmed and produced a bonus — the naive projection returned exactly
+**24,428** rows, reproducing the historical defect number live. The second claim came back the
+opposite of the way it was written down.
+
+**What I changed.**
+
+- `DONE` Every `OPTIONAL` leg collects the bare property (`collect(DISTINCT rel.source_chunk_id)`),
+  never a map. Only `cross_regulation` uses the map form, and only because its single leg is
+  mandatory — stated as rule 1 in the `cypher_templates` module docstring, next to the measured
+  output, so the next person to "unify the provenance shape" reads why first.
+- `DONE` `test_an_empty_optional_leg_collects_to_nothing` asserts `penalty_chunks == []` on an
+  obligation discovered from the graph to have no `PENALIZED_UNDER`. The obligation is *discovered*,
+  not hard-coded, because a hard-coded one that later gains a penalty edge turns the test green for
+  the wrong reason — the `definition_of` mistake three phases ago, which passed because its probe
+  term happened to be in an Article.
+- `DONE` `test_aggregating_provenance_is_what_holds_the_row_count` runs the naive projection beside
+  the real template and asserts **24,428 and 169** together, so the *reason* the count holds is under
+  test and not just the count. A future "simplification" back to a projected column fails with both
+  numbers in the message.
+- `DONE` `derived` is surfaced only on the two templates that can traverse an ADR-0010 bridge, and
+  `test_derived_is_confined_to_interacts_with` asserts `{INTERACTS_WITH: 22}` exactly — the narrow
+  scope is licensed by a test rather than by a paragraph.
+- `DONE` `validate()` in `src/query/graph_query.py` checks template name **and** the exact declared
+  parameter set before a driver is opened, with `test_run_template_validates_before_it_opens_a_driver`
+  passing raw Cypher as a template name. ADR-0002 was a prose commitment for three phases; it is now
+  a function with a test.
+
+**What I learned.** This document's recurring lesson is that a presence check gets asked to do a
+counting check's job. This is the same lesson with the subject changed: **a non-empty container is not
+evidence of content.** `[{chunk: null}]` is `[]` wearing a costume, and the costume is convincing
+enough that the test I would naturally have written — "every row carries provenance" — would have
+passed on it, which is why that test is in the file *alongside* the one that checks the empty case
+rather than instead of it.
+
+The second thing is cheaper to state and harder to do: the plan for this step contained a wrong claim,
+in writing, that was corrected by twenty minutes of probing a live database before any code was
+written. The claim was reasonable and it was wrong. **A design written against a database nobody
+queried is still a design written against a database nobody queried, even when the person writing it
+knows that is a failure mode of this project** — the fix is not knowing, it is running the query.

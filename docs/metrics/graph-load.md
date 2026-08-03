@@ -1,7 +1,8 @@
 # Graph load metrics (Phase 1 Step 4)
 
 Status: **loaded and idempotent.** 3,366 nodes and 6,680 relationships in Neo4j from 1,107 extracted
-chunks. All six Cypher templates return rows; three had to be fixed to get there.
+chunks. All six Cypher templates return rows; three had to be fixed to get there. As of Phase 3 Step 1
+they also return the `source_chunk_id` of every edge they traverse, so a graph-path answer is citable.
 
 Companion to `extraction-cost-and-findings.md`, which measures what came *out of the model*. This
 measures what came *out of the loader* — the graph's shape, the load's cost, and a row-count baseline
@@ -12,6 +13,7 @@ Regenerate everything here with:
 ```bash
 python -m src.ingest.graph_writer                 # derivation only, no database needed
 python -m src.ingest.graph_writer --apply --verify --report
+python -m src.query.graph_query --baseline        # the Template baseline table
 ```
 
 `--report` writes `data/processed/graph-load-report.json`, which is the machine-readable version of
@@ -193,20 +195,41 @@ Two eval rows become genuine article-level traversals: `xr-001` gains
 ## Template baseline
 
 Measured against the loaded graph. These are the Phase 3 regression anchors — a template that
-silently stops matching should change a number here.
+silently stops matching should change a number here. Regenerate with:
 
-| Template | Parameter | Rows | Coverage |
-|---|---|---|---|
-| `obligations_for_role` | `deployer` | 60 | 52 of 78 ActorRole nodes return ≥1 row |
-| `obligations_for_system` | `high risk ai system` | **169** | 41 SystemType nodes classified; 7 also reach obligations |
-| `enforcement_chain` | an obligation with `ENFORCED_BY` | ≥1 | 216 obligations enforced; only **4** also `PENALIZED_UNDER` |
-| `definition_of` | `provider` | 1 | **334** terms defined in an Article or Annex |
-| `cross_regulation` | `aia art. 2(7)` | 4 | 146 nodes carry ≥1 `INTERACTS_WITH` |
-| `path_between` | `deployer` ↔ `GDPR` | 1 path, 2 hops | — |
+```bash
+python -m src.query.graph_query --baseline
+```
+
+**Provenance** is `source_chunk_id`s per row, min–max, as counted by `provenance_of()`. Every template
+projects it as of Phase 3 Step 1; the row counts are unchanged from the pre-provenance measurement.
+
+| Template | Parameter | Rows | Provenance / row | Coverage |
+|---|---|---|---|---|
+| `obligations_for_role` | `deployer` | 60 | 1–2 (48 distinct) | 52 of 78 ActorRole nodes return ≥1 row |
+| `obligations_for_system` | `high risk ai system` | **169** | **124–126** (146 distinct) | 41 SystemType nodes classified; 7 also reach obligations |
+| `enforcement_chain` | an obligation with `ENFORCED_BY` | ≥1 | 1–1 | 216 obligations enforced; only **4** also `PENALIZED_UNDER` |
+| `definition_of` | `provider` | 1 | 1–1 | **334** terms defined in an Article or Annex |
+| `cross_regulation` | `aia art. 2(7)` | 4 | 1–1 | 160 nodes carry ≥1 `INTERACTS_WITH` |
+| `path_between` | `deployer` ↔ `GDPR` | 1 path, 2 hops | 2–2 (one per hop) | — |
 
 **`obligations_for_system` returned 24,428 rows before `RETURN DISTINCT`** — 169 × the 124 parallel
-`CLASSIFIED_AS` edges (approximately; the multiplication is per matched path). Every node-projecting
-template now uses `DISTINCT`, and the 169 is asserted exactly so that dropping it fails loudly.
+`CLASSIFIED_AS` edges (approximately; the multiplication is per matched path). That number is now a
+live assertion rather than history: `test_aggregating_provenance_is_what_holds_the_row_count` runs the
+naive projection alongside the real template and asserts **24,428 and 169** in the same test, so the
+reason the count holds is checked, not just the count.
+
+**The 124–126 column is the same defect in its remaining form.** All 169 rows carry the same 124
+`classified_chunks`, because 124 chunks really do assert that `high risk ai system` is `high risk`.
+Aggregation moved the multiplication out of the row count, but a consumer that renders every chunk in
+that list into a citation puts it straight back into the prose. Step 5's `path_to_prose` has to cap or
+rank this; it is the one place the hot fact can still do damage.
+
+**`path_between`'s provenance is one arbitrary chunk per hop.** `shortestPath` returns a single path,
+and where a hop has parallel edges the driver picks one, so `chunks[i]` names *an* asserting chunk for
+hop *i*, not *the* asserting chunk. `allShortestPaths` would enumerate them and is the 24,428-row
+multiplication in another costume, so this is a limitation to state rather than fix. `chunks`, `types`
+and `derived_flags` are positionally aligned with the hops, which a test asserts.
 
 ## Three template defects, and what each one teaches
 
@@ -256,9 +279,12 @@ do not really exist.
 
 ## Open
 
-- **No template projects a relationship.** `source_chunk_id` is on every edge and is the join key to
-  pgvector, but every template returns nodes, so citation validation cannot yet say which paragraph
-  asserted an edge it traversed. Phase 3 must fix this; it is not a one-line change.
+- ~~**No template projects a relationship.**~~ **Closed 2026-08-03** (Phase 3 Step 1). Every template
+  now returns per-edge `source_chunk_id` aggregated inside `collect()` per distinct node tuple, and all
+  six row counts are unchanged. `derived` is surfaced on `cross_regulation` and `path_between` — the
+  only two that can traverse an ADR-0010 bridge, which a test enforces rather than assumes. Execution
+  lives in `src/query/graph_query.py`; 36 tests in `tests/test_graph_query.py`, of which 14 need no
+  database.
 - **`gdpr-art70-para1` has no edges at all** — the 864-token EDPB task-list paragraph never extracted,
   so "which authority does what" has no graph path. A chunking problem, recorded in the failure notes.
 - **Alias-based merging is still unapplied** (ADR-0009), so `aliases` is carried as a node property but

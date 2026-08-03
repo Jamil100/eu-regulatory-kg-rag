@@ -1,7 +1,7 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** Step 0 done (2026-08-02). **Next action is Step 1** — bring Neo4j up (it is down as of
-this writing) and project relationships from the Cypher templates.
+**Status:** Steps 0–1 done (2026-08-02, 2026-08-03). **Next action is Step 2** — the entity linker,
+which turns a question into canonical node keys the Step 1 templates can be parameterised with.
 
 **Scope.** Roadmap Phase 3 (router + graph query path) *and* Phase 4 (path-to-prose, grounded
 generation, citation validation), which the roadmap puts in the same week under one exit criterion:
@@ -130,7 +130,36 @@ and a per-request accumulator threaded through router → embed → rerank → g
 
 ---
 
-## Step 1 — Project relationships from the Cypher templates
+## ~~Step 1 — Project relationships from the Cypher templates~~ ✅ DONE
+
+> **Outcome.** All six templates project provenance and **no row count moved** — 60 / 169 / 1 / 1 / 4 /
+> 1-path-2-hops, measured live before the rewrite and again after. Against this project's base rate of
+> 3-of-6 broken on first contact, **0 of 6 broke**, because the graph was brought up and queried before
+> anything was edited. `graph-load.md` §Open bullet 1 is closed. Suite **102 → 138 tests**; 36 new in
+> `tests/test_graph_query.py`, of which **14 need no database**.
+>
+> **The defect was in the fix, not in the templates.** The natural provenance shape —
+> `collect(DISTINCT {chunk: rel.source_chunk_id, ...})` — returns `[{chunk: null}]` rather than `[]` on
+> a missed `OPTIONAL MATCH`, because `collect` drops nulls but a map literal is never null. That is a
+> citation to nothing that passes every `if provenance:` check, and `enforcement_chain`'s optional leg
+> is the common case (only **4 of 216** enforced obligations carry `PENALIZED_UNDER`), so it would have
+> been the default. Found by probing the live graph before writing a template; OPTIONAL legs now
+> collect the bare property and only `cross_regulation` (single mandatory leg) uses the map form.
+>
+> **The row count is now tested for its reason, not just its value.**
+> `test_aggregating_provenance_is_what_holds_the_row_count` runs the naive projection beside the real
+> template and asserts **24,428 and 169** in one test — the historical defect number, reproduced live.
+>
+> **Scope notes.** `derived` is surfaced on `cross_regulation` and `path_between` only, licensed by
+> `test_derived_is_confined_to_interacts_with` asserting `{INTERACTS_WITH: 22}`. Execution lives in the
+> new `src/query/graph_query.py` (`run_template`, `provenance_of`, `--baseline` CLI); `TEMPLATES` stays
+> a `dict[str, str]` with a sibling `TEMPLATE_PARAMS`, so `tests/test_graph_writer.py` is untouched.
+> Two limitations are documented rather than fixed: `path_between` provenance is one **arbitrary** chunk
+> per hop where parallel edges exist (`allShortestPaths` is the 24,428 multiplication in another
+> costume), and `obligations_for_system` returns the same **124** `classified_chunks` on all 169 rows —
+> the hot fact is out of the row count but still in the prose unless Step 5 caps it.
+
+## Step 1 — Project relationships from the Cypher templates (original)
 
 The job `docs/metrics/graph-load.md` §Open names outright: *"No template projects a relationship…
 Phase 3 must fix this; it is not a one-line change."* Until it is fixed, `source_chunk_id` — the
@@ -420,7 +449,7 @@ Named so Phase 3 does not silently build on them.
 | Step | How you know it worked |
 |---|---|
 | ~~0~~ ✅ | ~~`ContextDoc` exists in `src/schemas.py`; `Chunk` is byte-unchanged; the four widened signatures typecheck; ADR-0011 written; a price table exists next to the model names~~ — all confirmed; 10 new tests (`test_schemas.py`, `test_config.py`), suite 92 → 102, 81 pass / 21 skip |
-| 1 | All six templates return provenance **and** the six baseline row counts are unchanged — `obligations_for_system('high risk ai system')` still exactly **169**; `graph-load.md` §Open bullet 1 closed |
+| ~~1~~ ✅ | ~~All six templates return provenance **and** the six baseline row counts are unchanged — `obligations_for_system('high risk ai system')` still exactly **169**; `graph-load.md` §Open bullet 1 closed~~ — all confirmed live; 36 new tests (`test_graph_query.py`), suite 102 → 138, 0 skipped with containers up / 14 pass + 22 skip with them down |
 | 2 | Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created |
 | 3 | Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled |
 | 4 | Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed |
