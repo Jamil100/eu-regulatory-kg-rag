@@ -52,6 +52,17 @@ A change is marked `DONE` only if code in this repo enforces it.
   two different system prompts — below the majority-class constant (`always-vector`, 41% error).
   The 4.5% is **in-sample**: the rules were authored with the gold labels visible. See
   `docs/adr/adr-0012-router-model-vs-rules.md`.
+- Rerank uplift over vector-only retrieval (21 labeled queries, 51 gold references, 512 dims,
+  exact search, top-50 reranked): micro recall **45.1% → 52.9% at k=5** (+4 chunks) and
+  **54.9% → 60.8% at k=10** (+3 chunks); hit rate@5 **76.2% → 85.7%**. Both clear the ±2-chunk
+  resolution ADR-0004 declared for this eval set and which was **pre-registered here before the
+  first rerank ran**. **No per-stratum move clears it** — including two-hop, which
+  `vector-index.md` §Open had named rerank "the obvious lever" for and which moved 3/10 → 4/10.
+  Report with the k-ceiling attached (45/51 at k=5, 50/51 at k=10) and the 3.6% corpus-coverage
+  caveat — see `docs/metrics/query-path.md`.
+- Gold references reachable by reordering but not reached: **10 of 13**. The top-50 pool holds
+  41 of 51 gold chunks; reranking returns 31 at k=10. The binding constraint on the vector path
+  is **ranking, not candidate retrieval** — measured, not inferred.
 - Citation-validation rejection rate: _TBD_
 - LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
@@ -71,6 +82,7 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
 | **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
+| **A number that measured the instrument instead of the subject** | **2** | **Comparing post-rerank@5 against pre-rerank@10 — a 9.8pp handicap made entirely of the gold-count distribution (`ag-001` has 11 gold chunks), which the phase plan itself specified. Caught by computing `Σ min(gold_i, k)` before running anything** · **Rerank p95 of 83 s, which measured a trial key holding a request open, not Rerank 3.5. Caught by recording `attempts` and finding all of them 1** |
 | **A container non-empty because of its shape, not its content** | **1** | `collect(DISTINCT {chunk: rel.source_chunk_id})` on a missed `OPTIONAL MATCH` returns `[{chunk: null}]`, not `[]` — one fake citation that passes every `if provenance:` check. **Caught by a probe before it was written**, which is the only reason the count is 1 and not a defect |
 
 **What the shape of this table says.** The top row is the most expensive class — three defects, all
@@ -82,6 +94,13 @@ The second row is the oldest and most persistent, and it is worth noticing that 
 from *this* document's own remedy: `definition_of` passed a non-empty test because the probe term was
 chosen from the part that worked — the identical mistake as the five hand-checked articles in the
 ingestion section, three phases later.
+
+**The newest row is the first one whose instances were caught before they were published, and both
+were caught the same way: by asking what the denominator belonged to.** Neither was a coding error —
+both numbers would have been computed correctly from correct data and would have been wrong about the
+world. One came from the phase plan's own written instruction, which is the more useful half of the
+lesson: a measurement protocol is as capable of encoding a defect as a few-shot example is, and this
+document already has a three-instance row proving the latter.
 
 ---
 

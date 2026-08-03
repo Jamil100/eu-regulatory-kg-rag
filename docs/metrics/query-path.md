@@ -1,10 +1,13 @@
 # Query path metrics
 
-Status: **Entity linker and router built and measured. 23 of 23 eval questions
-link to at least one graph node; 52% of links land in a gold chunk's entity set
-(64% excluding instrument nodes). Routing is deterministic: 21 of 22 rows, $0.00,
-3.5 ms — Command R7B scored 10 of 22, below the majority-class constant, and
-never emitted `both` at all.** Phase 3 Steps 2–3 complete. Steps 4–7 append here.
+Status: **Entity linker, router and vector path built and measured. 23 of 23 eval
+questions link to at least one graph node; 52% of links land in a gold chunk's
+entity set (64% excluding instrument nodes). Routing is deterministic: 21 of 22
+rows, $0.00, 3.5 ms — Command R7B scored 10 of 22, below the majority-class
+constant, and never emitted `both` at all. Rerank 3.5 over the top-50 lifts micro
+recall from 23/51 to 27/51 at k=5 and 28/51 to 31/51 at k=10 — a real aggregate
+gain, and not one per-stratum move clears this eval set's own resolution.**
+Phase 3 Steps 2–4 complete. Steps 5–7 append here.
 
 Fifth companion to `extraction-cost-and-findings.md` (what came out of the
 model), `graph-load.md` (what came out of the loader), `eval-set.md` (the
@@ -23,6 +26,12 @@ python -m src.query.router --eval                    # the router table, from th
 python -m src.query.router --eval --refresh          # re-run R7B live (~$0.0008)
 python -m src.query.router --question "..."          # both routers, one question
 pytest tests/test_router.py tests/test_eval_questions.py
+
+python -m src.query.reranker --eval                  # the k-matrix, from the artifact
+python -m src.query.reranker --eval --refresh        # re-run live (~$0.05)
+python -m src.query.retriever --question "..."       # top-50, no rerank
+python -m src.query.reranker  --question "..."       # retrieve then rerank
+pytest tests/test_retriever.py tests/test_reranker.py
 ```
 
 ---
@@ -301,8 +310,177 @@ examples are hand-written questions that appear nowhere in the eval set, asserte
 mechanically rather than promised in a comment. What survives the asymmetry is
 the gate failure and the missing class, neither of which is an accuracy question.
 
+## Vector path: retrieval and rerank
+
+21 labeled queries, 51 gold references, **512 dims** (ADR-0004), exact search,
+top-50 candidates, all 50 reranked. Source: `eval/rerank-eval.jsonl`, which
+stores the full retrieved and reranked orderings per question — every number
+below is recomputed from that file by `scoreboard()` with no database, no API key
+and no spend.
+
+### The denominator is capped, and reporting it wrongly would have flattered rerank
+
+Micro recall cannot reach 100% at small k, because a question with 11 gold chunks
+can contribute at most k of them. The ceiling is `Σ min(gold_i, k)`:
+
+| k | ceiling | max micro recall |
+|---|---|---|
+| 5 | 45/51 | **88.2%** |
+| 10 | 50/51 | **98.0%** |
+| 50 | 51/51 | 100% |
+
+**The phase plan asked for "recall@5-after-rerank against recall@10-before".**
+That comparison charges a *perfect* reranker 9.8 percentage points before it
+starts, and the entire k=5-vs-k=10 gap is one row: `ag-001` declares 11 gold
+chunks and every other question has at most 4. So the tables here report **pre@k
+against post@k at the same k**, with the ceiling printed beside every figure.
+
+Only `aggregation` is capped below 100% at k=5 (9/15). Every other stratum —
+including **two-hop, the number this step exists to move** — is uncapped at both
+k, so those deltas need no adjustment at all. Restating ADR-0004's aggregation
+figure against what is achievable rather than against 15: **7/14 = 50%**, not
+7/15 = 47%.
+
+### The k-matrix
+
+| k | pre-rerank | post-rerank | delta | ceiling | top-50 oracle | hit rate pre → post |
+|---|---|---|---|---|---|---|
+| 5 | 23/51 — 45.1% | **27/51 — 52.9%** | **+4** | 45/51 | 37/51 | 76.2% → **85.7%** |
+| 10 | 28/51 — 54.9% | **31/51 — 60.8%** | **+3** | 50/51 | 41/51 | 85.7% → 85.7% |
+| 50 | 41/51 — 80.4% | 41/51 — 80.4% | 0 | 51/51 | — | 95.2% → 95.2% |
+
+The k=50 row is 0 by construction — reranking all 50 candidates is a permutation,
+so it cannot change what the set contains. It is in the table as a check on the
+other two rows, and a test asserts it: if it ever moves, the sweep stopped
+reranking the full pool and the arms are measuring different candidate sets.
+
+**Pre-registered before the first rerank ran:** ADR-0004 declared 2 gold chunks
+out of 51 to be inside this eval set's resolution and refused to decide
+1536-vs-512 on a 1-chunk difference. The same threshold binds here. **+4 at k=5
+and +3 at k=10 clear it. Nothing else in this section does.**
+
+### Per stratum, where nothing clears the threshold
+
+| Stratum | n | gold | pre@5 | post@5 | Δ | pre@10 | post@10 | Δ | cap@10 | oracle@10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| two-hop | 4 | 10 | 3/10 | 4/10 | +1 | 3/10 | 4/10 | +1 | 10 | 7 |
+| aggregation | 3 | 15 | 5/15 | 5/15 | 0 | 7/15 | 8/15 | +1 | 14 | 12 |
+| cross-regulation | 4 | 10 | 5/10 | 7/10 | +2 | 6/10 | 7/10 | +1 | 10 | 7 |
+| three-hop | 2 | 6 | 3/6 | 3/6 | 0 | 4/6 | 4/6 | 0 | 6 | 5 |
+| single-hop | 6 | 8 | 6/8 | 6/8 | 0 | 6/8 | 6/8 | 0 | 8 | 8 |
+| hard-negative | 2 | 2 | 1/2 | 2/2 | +1 | 2/2 | 2/2 | 0 | 2 | 2 |
+
+**`vector-index.md` §Open named Rerank 3.5 "the obvious lever on the 30% two-hop
+figure". It is not.** Two-hop moves 3/10 → 4/10: one chunk, half the
+pre-registered resolution. The aggregate gain is real and the per-stratum story
+is not supported at this sample size — every cell in the Δ columns is 0, +1 or
++2, and a test asserts that so the day one of them clears ±2 it has to be written
+down here rather than quietly absorbed.
+
+The largest single move, cross-regulation +2 at k=5, is also the stratum where
+512 loses its one chunk to 1536. Reading it as a rerank effect and the dimension
+loss as a separate fact would be double-counting the same two questions.
+
+### The candidate pool is not the binding constraint — ranking is
+
+The top-50 holds **41 of 51** gold references. So reordering alone could reach
+41/51 at k=10; it reaches 31/51. **Rerank captured 3 of the 13 chunks available
+to it and left 10 on the table.** The `oracle` column above is the per-query form
+`Σ min(|gold_i ∩ top50_i|, k)`, not the looser `min(recall@50, cap@k)`, so it is
+a ceiling that is actually reachable.
+
+Two-hop is the sharpest case: 7 of its 10 gold chunks are in the pool and 4 come
+back at k=10. Whatever is wrong with two-hop retrieval, **it is not that the
+right paragraphs were never retrieved.** That points at ranking and at
+paragraph-level chunking (ADR-0003, `vector-index.md` §Open) rather than at the
+embedding.
+
+### Latency, in three components
+
+`vector-index.md` quotes **6.68 ms p50**, which is SQL alone with the query
+vector already in hand. A request pays an embedding round trip to get it, and the
+vector route pays a rerank round trip after. Reported separately so Step 7's
+end-to-end number is not read as a 50× regression against something that never
+measured the same thing.
+
+| component | p50 | note |
+|---|---|---|
+| embed | 30 ms | amortised over one batched call for 23 questions; a single `/ask` pays **~330 ms** |
+| search | 9.3 ms | SQL only, k=50 — consistent with ADR-0004's 6.68 ms at k=10 |
+| rerank | **286 ms** | 50 documents, one search unit |
+
+**The p95 is not reported, because it would be a fact about the API key.** Three
+of 23 rerank calls stalled inside a *single* HTTP request — `hn-001` 83.5 s,
+`sh-006` 82.4 s, `th-003` 3.9 s — all with `attempts=1`, so this was not retry
+backoff. The measurement ran on a Cohere trial key (10 calls/minute), and the
+tier appears to hold a request open rather than return 429. The other 20 calls
+returned in 230–340 ms. `scoreboard()` lists the stalls by name and the report
+prints "quote the p50, not the p95"; a percentile over 23 calls with that tail
+describes the account, not Rerank 3.5.
+
+### Cost, and the one rate in this repo with no first-party source
+
+23 questions, **23.0 billed search units**, one per question — read off
+`meta.billed_units.search_units` on each response rather than inferred from the
+document count, which matters because Cohere splits documents over 500 tokens
+into extra units and this corpus has chunks up to 864 tokens.
+
+At $2.00 per 1,000 searches that is **$0.046 for the sweep, $0.002 per question**
+— by far the dominant per-query cost on the vector route, against $0.0000032 for
+the embedding and $0.00 for routing.
+
+**That rate is the weakest number in `src/config.py` and should be read as
+provisional.** Checked 2026-08-03: `cohere.com/pricing` publishes only a Model
+Vault hourly rate for Rerank 3.5 ($5/hr) and `docs.cohere.com` states no price at
+all. Cohere's page does define the unit — *"A single search unit is defined as one
+query with up to 100 documents to be ranked"* — but not what it costs. $2.00/1K
+is what third-party pricing aggregators carry. Because the artifact stores
+`search_units`, correcting the constant re-prices every historical measurement
+without re-running anything.
+
+`rerank-v3.5` was checked for deprecation at the same time and is current: the
+live response carries `is_deprecated=None` and no warnings, and Cohere's
+deprecations page lists only the v2.0 rerank models. Third-party listings
+describing a `cohere-rerank-3.5` retirement in August 2026 refer to the
+Bedrock/Pinecone-hosted naming, not this API model.
+
+### A free observation for Step 6's refusal path
+
+The two rows with no gold — one `out-of-scope`, one `unanswerable` — were
+reranked anyway, since they cost nothing extra. **The cross-encoder is confident
+on both**: top relevance **0.747** for `oos-001` and **0.796** for `oos-002`,
+against 0.90 for a well-answered question. A rerank score is therefore *not* a
+usable refusal signal — there is no threshold that separates these two from a
+real answer. n=2, so this is an observation and not a rule, but Step 6 should not
+plan on rerank confidence as a refusal input.
+
+### Defects found on the way in
+
+| Defect | Symptom | Fix |
+|---|---|---|
+| The reranker had no retry, unlike every other API call site in the repo | the first sweep died mid-run on a 429 from a 10-calls/minute trial key | `_rerank_call` wrapped in the same tenacity policy as `embedder._embed_call`; a transient limit no longer fails a request |
+| The sweep embedded each question separately | 46 API calls where 24 would do, and the k-matrix arms could have seen different vectors | one batched `embed_texts` call, vectors handed to `retrieve_detailed(vector=...)` |
+| Rerank p95 read 83 s and looked like a model figure | retry-vs-stall was indistinguishable in the artifact | `attempts` recorded per call; stalls listed by name, never averaged into a percentile |
+
 ## Open
 
+- **Rerank leaves 10 of 13 available chunks unrecovered**, and nothing here
+  explains why. The candidate pool is not the constraint — that is measured — so
+  the next lever is chunking (ADR-0003) or a different ranking signal, not a
+  bigger `top_k`.
+- **No per-stratum rerank claim is supportable at n=23.** Every stratum delta is
+  0, +1 or +2 against a pre-registered resolution of ±2. The 100-row set is what
+  would make two-hop's +1 either a finding or a nothing.
+- **The rerank rate has no first-party source.** See above. `search_units` is
+  measured; the dollars are not.
+- **`AskResponse.cost_usd` is `float` and required (`src/schemas.py:294`).** It
+  can now be filled for the vector route, but only because `RERANK_PRICE_PER_SEARCH`
+  is a number rather than `None`. If that constant ever goes back to `None` — the
+  honest state if the aggregator figure is withdrawn — the field cannot represent
+  the route's cost. Step 7 has to decide between `float | None` and a
+  "priced components only" flag; this is flagged now so it is not discovered then.
+- **Rerank latency is unmeasured on a production key.** 286 ms p50 comes from 20
+  clean calls on a trial key whose tail behaviour is visible in the stalls above.
 - **The rules number is in-sample and the eval set cannot currently say by how
   much.** Nothing here is a held-out measurement. The 100-row set is the only
   thing that resolves it, and the honest prior is that 95% will fall.

@@ -104,18 +104,35 @@ it.
 The k=10 ceiling costs 1 reference: `ag-001` declares 11 gold chunks, so 50/51
 (98.0%) is the maximum achievable, not 100%.
 
+**The p50 above is SQL only.** It is the time the database spends, measured
+around `search()` with the query vector already in hand. A request also pays a
+round trip to Embed v4 to *get* that vector, which the harness excludes because
+it embeds every question once up front. Measured at 512 on 2026-08-03, that round
+trip is **~330 ms** for a single question (`python -m src.query.retriever
+--question ...`). Quoting 6.68 ms as the latency of retrieval overstates it by
+roughly fifty times — see `query-path.md`, which reports embed, search and rerank
+as three separate components for this reason.
+
 ### The result that matters is per-stratum
 
-Exact search, 1536:
+Exact search. The 512 column was added in Phase 3 Step 4: the request path
+retrieves at 512 (ADR-0004), so measuring a rerank delta against the 1536 column
+would have conflated two changes in one number.
 
-| Stratum | micro recall@10 |
-|---|---|
-| hard-negative | 2/2 — **100%** |
-| single-hop | 6/8 — **75%** |
-| cross-regulation | 7/10 — 70% |
-| three-hop | 4/6 — 67% |
-| aggregation | 7/15 — 47% |
-| two-hop | 3/10 — **30%** |
+| Stratum | micro recall@10, 1536 | micro recall@10, **512** |
+|---|---|---|
+| hard-negative | 2/2 — **100%** | 2/2 — **100%** |
+| single-hop | 6/8 — **75%** | 6/8 — **75%** |
+| cross-regulation | 7/10 — 70% | 6/10 — 60% |
+| three-hop | 4/6 — 67% | 4/6 — 67% |
+| aggregation | 7/15 — 47% | 7/15 — 47% |
+| two-hop | 3/10 — **30%** | 3/10 — **30%** |
+
+**The whole 29-vs-28 difference is cross-regulation, and it is one chunk.** Every
+other stratum is identical at both dimensions. That is a sharper version of what
+ADR-0004 already said — the difference was `xr-003` alone — and it means the two
+strata this project cares most about, two-hop and aggregation, are unaffected by
+the dimension choice.
 
 **This is the shape the whole project predicted, measured before the graph path
 exists.** Vector search handles single-paragraph questions well and falls apart
@@ -184,8 +201,19 @@ and changes nothing else. No re-extraction: `cache_key()` hashes only text, and
   when the eval set can resolve a 2% difference; drop it when it cannot.
 - **GDPR-side retrieval is nearly unmeasured** — 6 of 40 gold chunks, inherited
   straight from `eval-set.md`.
-- **No reranker measurement yet.** Rerank 3.5 over the top-50 is the obvious
-  lever on the 30% two-hop figure and is Phase 3 work.
+- ~~**No reranker measurement yet.** Rerank 3.5 over the top-50 is the obvious
+  lever on the 30% two-hop figure and is Phase 3 work.~~ **Closed 2026-08-03,
+  Phase 3 Step 4.** Measured: Rerank 3.5 over the top-50 moves micro recall from
+  23/51 to **27/51 at k=5** and from 28/51 to **31/51 at k=10**. It did **not**
+  move the two-hop figure this bullet named it a lever for — 3/10 to 4/10, one
+  chunk, inside the ±2 resolution ADR-0004 declared for this eval set. The
+  aggregate gain is real; the per-stratum story this bullet predicted is not
+  supported at n=23. Full k-matrix, ceilings and oracle in
+  `docs/metrics/query-path.md`.
+- **10 of the 13 available chunks are still on the table.** The top-50 candidate
+  pool holds 41 of 51 gold references, so reordering alone could reach 41/51;
+  reranking reaches 31/51. The remaining gap is a ranking problem, not a
+  retrieval one, and it is larger than anything the reranker recovered.
 - **Recall is measured on the corpus as chunked**, so paragraph-level chunking
   (ADR-0003) is untested against alternatives. The Art. 26 / Art. 9 miss pattern
   is the first evidence that it has a cost.

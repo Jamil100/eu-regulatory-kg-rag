@@ -1,8 +1,10 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** Steps 0–3 done (2026-08-02, 2026-08-03). **Next action is Step 4** — the vector path,
-retriever + reranker. The router is deterministic and adopted (ADR-0012), so `/ask` contributes $0.00
-and ~3.5 ms before retrieval starts and the whole per-query cost belongs to embed, rerank and generate.
+**Status:** Steps 0–4 done (2026-08-02, 2026-08-03). **Next action is Step 5** — the graph path:
+template selection, execution, path-to-prose. The router is deterministic and adopted (ADR-0012), so
+`/ask` contributes $0.00 and ~3.5 ms before retrieval starts. The vector path is now measured end to
+end: **$0.002 per question**, essentially all of it rerank, against $0.0000032 for the embedding —
+so the per-query cost belongs to rerank and generate, not to embed.
 
 **Scope.** Roadmap Phase 3 (router + graph query path) *and* Phase 4 (path-to-prose, grounded
 generation, citation validation), which the roadmap puts in the same week under one exit criterion:
@@ -377,7 +379,57 @@ Phase 5.
 
 ---
 
-## Step 4 — Vector path: retriever + reranker
+## ~~Step 4 — Vector path: retriever + reranker~~ ✅ DONE
+
+> **Outcome.** `retrieve()` and `rerank()` built with request-path error handling, measured, and the
+> `vector-index.md` reranker §Open bullet closed. Rerank 3.5 over the top-50 moves micro recall
+> **23/51 → 27/51 at k=5** (+4 chunks) and **28/51 → 31/51 at k=10** (+3), hit rate@5 **76.2% →
+> 85.7%**. Both clear the ±2-chunk resolution ADR-0004 declared for this eval set — **pre-registered
+> before the first rerank ran**. Suite **197 → 258 tests** (61 new across `test_retriever.py` and
+> `test_reranker.py`); **258 pass / 0 skip** with containers up. Sweep artifact `eval/rerank-eval.jsonl`
+> stores the full retrieved *and* reranked 50 per question, so every published number is recomputed by
+> a pure `scoreboard()` with no database, no API key and no spend.
+>
+> **This step's own instruction was the trap it warned about.** "Report recall@5-after-rerank against
+> recall@10-before" charges a *perfect* reranker 9.8 percentage points, because micro recall is capped
+> at `Σ min(gold_i, k)` — 45/51 at k=5 against 50/51 at k=10 — and the entire gap is one row
+> (`ag-001` declares 11 gold chunks; every other question has ≤4). The comparison is same-k, with the
+> ceiling printed beside every figure. Caught by computing the ceiling before running anything, which
+> is the only reason it is a correction and not a published result.
+>
+> **The lever this step existed to pull did not move the number it was named for.** `vector-index.md`
+> §Open called rerank "the obvious lever on the 30% two-hop figure". Two-hop went **3/10 → 4/10**:
+> one chunk, half the pre-registered resolution. **No per-stratum delta clears ±2** — every cell is 0,
+> +1 or +2 — so the aggregate gain is supportable and not one stratum-level claim is. A test asserts
+> that, so the day one clears it, it has to be written down rather than absorbed.
+>
+> **The binding constraint is ranking, and that is now measured rather than assumed.** The top-50 pool
+> holds **41 of 51** gold references against 31 returned at k=10, so **10 of the 13 chunks available to
+> reordering are still unrecovered**. The per-query oracle `Σ min(|gold_i ∩ top50_i|, k)` was measured
+> *before* `rerank()` was written, precisely so a null result could be attributed to the reranker
+> rather than to an empty candidate pool. Two-hop has 7 of 10 in the pool: the right paragraphs are
+> being retrieved and mis-ranked.
+>
+> **Two numbers were rejected for measuring the instrument.** Besides the k=5-vs-k=10 ceiling, a rerank
+> **p95 of 83 s** turned out to be a Cohere trial key holding three single HTTP requests open (`hn-001`
+> 83.5 s, `sh-006` 82.4 s, `th-003` 3.9 s) — all with `attempts=1`, so not retry backoff. `attempts` is
+> now recorded per call and stalls are listed by name instead of averaged into a percentile that would
+> be quoted as a model figure. p50 is **286 ms** over the 20 clean calls. Both cases are a new
+> `failure-notes.md` recurrence row.
+>
+> **Scope notes.** The 512 per-stratum baseline was produced first from the *unmodified*
+> `recall_harness` — the whole 29-vs-28 gap is cross-regulation and one chunk, so two-hop and
+> aggregation are unaffected by the dimension choice. Pricing was split: the **quantity** is measured
+> (`meta.billed_units.search_units`, 23.0 over 23 questions), the **rate** ($2.00/1K) is the only
+> number in `config.py` with no first-party source — `cohere.com/pricing` publishes only a $5/hr Model
+> Vault rate — so `price_of_rerank()` is a sibling of `price_of()` and `PRICES["rerank-v3.5"]` stays
+> `None`, keeping `tests/test_config.py` green. `rerank-v3.5` was checked for deprecation and is
+> current. `embedder.py` is **untouched**: the request-path embed calls `_embed_call` directly and
+> raises `RetrieverError`, since catching `SystemExit` means catching `BaseException`. The reranker
+> shipped without a retry and died on a 429 mid-sweep; it now carries the same tenacity policy as every
+> other call site in the repo.
+
+## Step 4 — Vector path: retriever + reranker (original)
 
 - **`retrieve()`** — reuse the query shape proven in `src/index/recall_harness.py:62`, including the
   load-bearing `%s::vector` cast (psycopg adapts a bare list to `double precision[]` and `ORDER BY`
@@ -532,7 +584,7 @@ Named so Phase 3 does not silently build on them.
 | ~~1~~ ✅ | ~~All six templates return provenance **and** the six baseline row counts are unchanged — `obligations_for_system('high risk ai system')` still exactly **169**; `graph-load.md` §Open bullet 1 closed~~ — all confirmed live; 36 new tests (`test_graph_query.py`), suite 102 → 138, 0 skipped with containers up / 14 pass + 22 skip with them down |
 | ~~2~~ ✅ | ~~Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created~~ — all confirmed; precision **52%** (64% excl. instruments) with recall reported as a labelled lower bound after the denominator was measured at 18.9 nodes/row; **38/38** linked names live in Neo4j; 21 new tests, suite 138 → **159**, 0 skipped with containers up |
 | ~~3~~ ✅ | ~~Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled~~ — all confirmed; rules **21/22** adopted over R7B **10/22**, which also lost to the majority-class constant (**13/22**) and failed the pre-registered gate; R7B emitted `both` **0 of 23** times under two prompts; 38 new tests, suite 159 → **197**, 0 skipped with containers up |
-| 4 | Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed |
+| ~~4~~ ✅ | ~~Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed~~ — all confirmed; measured against a **512** baseline produced first from the unmodified harness, not against the published 1536 table; **+4 chunks at k=5 / +3 at k=10** clear the pre-registered ±2 resolution while **no per-stratum delta does**; the k=5 ceiling (45/51) corrected the step's own reporting instruction; 61 new tests, suite 197 → **258**, 0 skipped with containers up |
 | 5 | Template selection measured against `ontology_edges`; prose uses `display_name`; every graph statement carries ≥1 `source_chunk_id`; derived edges identifiable in output |
 | 6 | Every cited `chunk_id` provably ∈ retrieved set; regenerate-once path exercised by a test, not by hope; `_TBD_` at `failure-notes.md:40` filled |
 | 7 | `POST /ask` returns all five `AskResponse` fields on all three routes; `cost_usd` is non-zero and per-route; p50/p95 recorded |
