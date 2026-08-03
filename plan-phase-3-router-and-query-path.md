@@ -1,7 +1,8 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** Steps 0–1 done (2026-08-02, 2026-08-03). **Next action is Step 2** — the entity linker,
-which turns a question into canonical node keys the Step 1 templates can be parameterised with.
+**Status:** Steps 0–2 done (2026-08-02, 2026-08-03, 2026-08-03). **Next action is Step 3** — the
+router, measured as Command R7B against a deterministic baseline. Step 2's linked-entity count is one
+of that baseline's rules, and is now available: `link_detailed()` returns node names with types.
 
 **Scope.** Roadmap Phase 3 (router + graph query path) *and* Phase 4 (path-to-prose, grounded
 generation, citation validation), which the roadmap puts in the same week under one exit criterion:
@@ -223,7 +224,46 @@ and keep it importable without a database, so the pure parts stay testable.
 
 ---
 
-## Step 2 — Entity linker
+## ~~Step 2 — Entity linker~~ ✅ DONE
+
+> **Outcome.** `link()` and `link_detailed()` in `src/query/entity_linker.py`, deterministic, **0 API
+> calls / $0.00 / 5.5 ms per question**. **23 of 23** questions link to ≥1 node; the **38** distinct
+> names they reach all exist as live `:Entity` nodes, and every linked `ActorRole` returns rows from
+> `obligations_for_role` — `deployer` at exactly **60**, the graph-load anchor, reached from
+> `ag-001`'s wording rather than hand-typed. Suite **138 → 159 tests** (21 new in
+> `tests/test_entity_linker.py`); **159 pass / 0 skip** with containers up. New
+> `docs/metrics/query-path.md`; `graph-load.md` §Open alias bullet closed for lookup, still open for
+> merging.
+>
+> **The embedding stage was not built,** per ADR-0009's own measurement (`dpo` vs `data protection
+> officer` = 0.42, *below* legitimately-distinct pairs at 0.75). The bar it must now clear is
+> concrete: beat 100% link rate and 52% precision at $0.00 and 5.5 ms. The stub docstring was
+> corrected to describe what exists.
+>
+> **The metric this step was given was wrong, and measuring the denominator first is what caught
+> it.** Gold-chunk `entity_ids` averages **18.9 nodes per row** (75 for `ag-001`) against 3.6 links
+> per question, so recall against it is capped by arithmetic — reported as a labelled lower bound
+> (10%) with precision as the headline (**52%**, or **64%** excluding `Regulation` nodes, which
+> questions name and chunks rarely assert). All five zero-scoring rows are penalty questions whose
+> gold sets are article-citation nodes plus strings like `administrative fine up to eur 20 000 000 or
+> 4 % of total worldwide annual turnover` — text no question contains. `ag-003` links correctly and
+> scores 0. That is the argument for the hand-labelled set this plan deferred.
+>
+> **Two defects, both of which returned plausible results.** `_trim` peels `" .,;:"` and not `?`, so
+> `"...a notified body?"` linked the obligation `notify use of real time remote biometric
+> identification system` instead of `notified body`; and `normalize()` deletes apostrophes, so
+> `"the GDPR's highest fine tier"` became `gdprs` and `ag-003` reached no instrument at all. The fix
+> for the second had a defect of the same family — on multi-token spans `"the controller's"` shadowed
+> `"controller's representative"` — now restricted to single-token spans. Both are regression tests.
+>
+> **Scope notes.** The plural fold was rebuilt over alias surfaces as well as canonical names (18 →
+> **124** merges) using the resolver's own `_plural_map`, measured before adopting: **0** extra merges
+> swallow a node that owns its name, and `premises`/`analysis`/`business`/`bias`/`practices` stay
+> unmerged. `LinkedEntity` lives in `entity_linker.py`, not `schemas.py`. Ambiguity policy is
+> implemented but **untested by measurement** — 372 alias surfaces are ambiguous, yet **0 of 79**
+> links come out ambiguous, so both report arms are identical; it needs the eval set at 100.
+
+## Step 2 — Entity linker (original)
 
 `link(question) -> list[str]` returning canonical node keys usable directly as Cypher parameters.
 `schema.sql:50-53` already guarantees the shape: `entity_ids` are "the same string as the Neo4j MERGE
@@ -450,7 +490,7 @@ Named so Phase 3 does not silently build on them.
 |---|---|
 | ~~0~~ ✅ | ~~`ContextDoc` exists in `src/schemas.py`; `Chunk` is byte-unchanged; the four widened signatures typecheck; ADR-0011 written; a price table exists next to the model names~~ — all confirmed; 10 new tests (`test_schemas.py`, `test_config.py`), suite 92 → 102, 81 pass / 21 skip |
 | ~~1~~ ✅ | ~~All six templates return provenance **and** the six baseline row counts are unchanged — `obligations_for_system('high risk ai system')` still exactly **169**; `graph-load.md` §Open bullet 1 closed~~ — all confirmed live; 36 new tests (`test_graph_query.py`), suite 102 → 138, 0 skipped with containers up / 14 pass + 22 skip with them down |
-| 2 | Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created |
+| ~~2~~ ✅ | ~~Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created~~ — all confirmed; precision **52%** (64% excl. instruments) with recall reported as a labelled lower bound after the denominator was measured at 18.9 nodes/row; **38/38** linked names live in Neo4j; 21 new tests, suite 138 → **159**, 0 skipped with containers up |
 | 3 | Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled |
 | 4 | Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed |
 | 5 | Template selection measured against `ontology_edges`; prose uses `display_name`; every graph statement carries ≥1 `source_chunk_id`; derived edges identifiable in output |

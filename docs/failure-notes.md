@@ -40,6 +40,12 @@ A change is marked `DONE` only if code in this repo enforces it.
   (`hn-001` pointed at AIA Art. 99(1), which states no figure). Golds themselves were sound — every
   gold chunk id existed and 16 spot-checked claims matched the source text. See
   `docs/metrics/eval-set.md`.
+- Entity linking (23 eval questions, deterministic sweep, no API calls): **23 of 23 questions link to
+  ≥1 graph node**; **76%** of scoreable rows link ≥1 node a gold chunk asserts; precision **52%**
+  (**64%** excluding `Regulation` nodes, which questions name and chunks rarely assert). Recall
+  against gold-chunk `entity_ids` is **10%** and is a **lower bound fixed by arithmetic** — that
+  denominator averages 18.9 nodes per row against 3.6 links per question. See
+  `docs/metrics/query-path.md`.
 - Router misclassification rate: _TBD_
 - Citation-validation rejection rate: _TBD_
 - LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
@@ -54,7 +60,7 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | Root cause | Times | Where |
 |---|---|---|
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
-| **Confirmed the part I looked at, assumed it covered the whole** | **5** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) |
+| **Confirmed the part I looked at, assumed it covered the whole** | **6** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · **`_trim` verified against corpus names, reused on questions — no legal name ends in `?`** |
 | **A count mistaken for a shape** | **2** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere |
 | **An interface neither side ever crossed** | **4** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · **`chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases** |
 | **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
@@ -1176,3 +1182,85 @@ in writing, that was corrected by twenty minutes of probing a live database befo
 written. The claim was reasonable and it was wrong. **A design written against a database nobody
 queried is still a design written against a database nobody queried, even when the person writing it
 knows that is a failure mode of this project** — the fix is not knowing, it is running the query.
+
+---
+
+# Phase 3 Step 2: the linker's defects were in the punctuation, and the metric's were in the denominator
+
+Written 2026-08-03, building `link(question) -> list[str]` — the first code in this repo that turns a
+question into a Cypher parameter.
+
+**What happened.** Two defects, both of which returned plausible results, and one bad measurement that
+would have been reported as a finding.
+
+The linker is a longest-match sweep over `normalize()` plus an alias index. A throwaway prototype run
+against all 23 eval questions *before* the module was written linked 23 of 23 and looked healthy. Two
+things in it were wrong, and both were visible only in the output detail, never in the counts:
+
+1. **`_trim` peels `" .,;:"` and not `?`.** No node name ends in a question mark, so the corpus-side
+   normaliser never needed one. Every question does. `"...does it require a notified body?"` failed to
+   match `notified body`, fell back to the bare token `notified`, and linked the obligation
+   **`notify use of real time remote biometric identification system`** — an alias hit on a completely
+   unrelated node. The question still linked five entities and still "worked".
+2. **`normalize()` deletes apostrophes**, which turns a possessive into a plural that no fold covers.
+   `"the GDPR's highest fine tier"` normalised to `gdprs`, matched nothing, and `ag-003` linked **no
+   instrument at all** — a GDPR question that never reached the GDPR node, while still returning
+   `['infringement']` and counting as linked.
+
+**The fix for the second had a defect of the same family.** Applied to multi-token spans, the
+possessive strip let `"the controller's"` — stripped to the alias `the controller` — shadow
+`"controller's representative"` one token to the right, because the sweep commits leftmost-longest. A
+fix that only ever *added* matches at a given position could still *remove* one at the next position.
+Caught by a test written from the corpus rather than from the question set: 122 surfaces end in `s`
+and land on a different node if the letter comes off.
+
+**What caught it.** Printing the span that produced each link, not just the link. Every one of these
+is invisible in `link()`'s output and obvious in `link_detailed()`'s. The counts — 23 of 23 linking,
+~3.6 nodes per question — were identical before and after both fixes.
+
+**The measurement was worse than the code.** The plan specified gold = the gold chunks' `entity_ids`,
+explicitly to avoid new hand-labelling. Measured before use, that set averages **18.9 nodes per row**
+and reaches **75** for `ag-001`, against a linker that emits 3.6. Recall against it is capped far below
+1.0 by arithmetic, so the 10% it reports is not a fact about the linker. Worse, the five rows scoring
+zero are all penalty questions, and their gold sets are article-citation nodes plus one very long
+penalty name (`administrative fine up to eur 20 000 000 or 4 % of total worldwide annual turnover`) —
+strings no question contains. The linker links what a question *says*; the gold set holds what a chunk
+*asserts*; on those rows the vocabularies are disjoint. `ag-003`'s links are the correct reading of
+the question and score 0.
+
+**What I changed.**
+
+- `DONE` `?!` stripped at the linker boundary, in `_surfaces()`, **not** in `_trim` — widening the
+  corpus normaliser would move node keys, which is ADR-0009's Correction in reverse.
+  `test_a_trailing_question_mark_does_not_truncate_a_span` asserts both halves: that `notified body`
+  links, and that nothing starting `notify use of` does.
+- `DONE` The possessive form is tried *after* the plain one and on single-token spans only.
+  `test_the_possessive_form_is_only_ever_a_fallback` asserts the ordering directly rather than
+  sampling behaviour, because ordering is the guarantee that makes it safe.
+- `DONE` The plural fold is rebuilt over alias surfaces as well as canonical names — 18 merges to 124
+  — using the resolver's own `_plural_map` rather than a second copy of the rule. Two tests license
+  it: `deployers` folds (`ag-001` needs it), and `premises`/`analysis`/`business`/`bias`/`practices`
+  do not, because their singulars are unattested. A third asserts no fold swallows a node that owns
+  its own name.
+- `DONE` Precision is the reported headline, recall is printed with its denominator explained **in the
+  CLI output**, not only in the doc — the number and its caveat travel together or the caveat is lost.
+- `DONE` The instrument split is computed, not asserted: 14 of 36 misses are `Regulation` nodes, so
+  precision is 52% as specified and 64% excluding them, and both are printed.
+- `OPEN` A hand-labelled per-question entity set. The penalty-row finding above is the argument for it;
+  the plan deferred it to avoid hand-labelling and that trade is now measured rather than assumed.
+- `OPEN` Leftmost-longest *cover* instead of leftmost-longest match. Would fix the shadowing case and
+  multi-word possessives (`"the European Commission's report"`) together. No eval row exercises it.
+
+**What I learned.** The recurrence tracker's oldest row is "confirmed the part I looked at, assumed it
+covered the whole." This is that row applied to punctuation: `_trim` was verified against the corpus,
+correctly, and the corpus is a set of legal names that never end in `?`. The defect was not in `_trim`
+— it was in reusing a component **at a boundary its inputs had never crossed**, which is the same
+shape as `Chunk` vs the JSONL nobody validated against it and `schema.sql` vs the corpus nobody
+loaded. Reuse carries the original's assumptions along with its code, and questions are not corpus
+text.
+
+The second lesson is about measurement, and it is new here: **a denominator can be wrong in a way that
+looks like a result.** A 10% recall figure is a perfectly plausible bad-linker number. Nothing in the
+output distinguishes it from a bad linker except computing what the denominator actually contains
+first — which took one command and would not have been run if the plan's metric had been adopted as
+written.

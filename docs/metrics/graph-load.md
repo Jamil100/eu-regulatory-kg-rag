@@ -287,5 +287,10 @@ do not really exist.
   database.
 - **`gdpr-art70-para1` has no edges at all** — the 864-token EDPB task-list paragraph never extracted,
   so "which authority does what" has no graph path. A chunking problem, recorded in the failure notes.
-- **Alias-based merging is still unapplied** (ADR-0009), so `aliases` is carried as a node property but
-  never used to collapse nodes. The Phase 3 entity linker is the intended consumer.
+- **`aliases` finally has a consumer** — **2026-08-03** (Phase 3 Step 2). `src/query/entity_linker.py`
+  indexes all 3,322 normalised alias surfaces to resolve a question span to a `canonical_name`, which
+  is what makes the property load-bearing rather than decorative. **Alias-based *merging* is still
+  unapplied**, and stays open: lookup asks "which node does this surface name?", merging asks "are
+  these two nodes the same?", and ADR-0009's warning applies only to the second — the candidate list
+  that offers 88 real merges also offers `law enforcement agency` ← `law enforcement purposes`. See
+  `docs/metrics/query-path.md`.
