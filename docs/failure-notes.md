@@ -88,7 +88,7 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | **Confirmed the part I looked at, assumed it covered the whole** | **6** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · **`_trim` verified against corpus names, reused on questions — no legal name ends in `?`** |
 | **A count mistaken for a shape** | **3** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere · **Command R7B at 45% accuracy — a weak-but-working classifier by the count, and by the distribution a three-way classifier that emitted `both` 0 of 23 times** |
 | **An interface neither side ever crossed** | **5** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · `chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases · **`validate()` checks parameter *names*, the graph matches parameter *values*, and nothing checked that a validated call returns rows — 4 of R7B's 9 calls cleared ADR-0002's boundary and matched no node** |
-| **Verified once by hand, never encoded** | **4** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) · **the retry policy: Step 4 wrote down "the reranker had no retry, unlike every other API call site", and Step 5's new call site shipped without one too — a 429 scored the arm under measurement a zero** |
+| **Verified once by hand, never encoded** | **5** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) · the retry policy: Step 4 wrote down "the reranker had no retry, unlike every other API call site", and Step 5's new call site shipped without one too — a 429 scored the arm under measurement a zero · **Step 5's own pre-registration: the ceiling and oracle were computed by scripts in a temp directory outside the repo and transcribed as literals, in the same commit whose write-up bumped this row to 4** |
 | **A metric that looked like success** | **3** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans · **`ontology_edges` selection accuracy: ceiling 9 of 9, best constant 8 of 9 — any selector scores ~90%. Caught by computing the constants before writing an arm** |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
 | **A number that measured the instrument instead of the subject** | **2** | **Comparing post-rerank@5 against pre-rerank@10 — a 9.8pp handicap made entirely of the gold-count distribution (`ag-001` has 11 gold chunks), which the phase plan itself specified. Caught by computing `Σ min(gold_i, k)` before running anything** · **Rerank p95 of 83 s, which measured a trial key holding a request open, not Rerank 3.5. Caught by recording `attempts` and finding all of them 1** |
@@ -1474,3 +1474,54 @@ choosing safe was never designed to have an opinion about the filling. **A secur
 holds is not evidence that the thing passing through it is correct** — and I had three phases of
 citing `validate()` without ever asking what a validated-but-wrong call would look like. It looks
 like success.
+
+## Addendum, same day, after commit `e480dc4`: the pre-registration was itself unencoded
+
+**What happened.** Everything above is true and the numbers are right — but the three figures the
+entry rests on (edge ceiling **9 of 9**, anchor ceiling **9 of 9**, oracle **24 of 32**) were computed
+by three scripts in a **session temp directory outside the repo** and then transcribed into
+`src/query/template_selector.py` as literals. Nothing in the project recomputed them.
+
+**Why it mattered.** `test_rules_reaches_the_oracle` asserted `board["rules"]["gold_hit"] ==
+ORACLE_GOLD_HITS` — `24 == 24`, with the right-hand side typed by me. A wrong transcription would
+have passed. Worse, a future selector improvement to 26 would turn the test red, and the cheapest
+repair would be to edit the constant, silently deleting the finding that the selector is already
+oracle-optimal. The step's headline claim was resting on a number the repo could not check.
+
+`reranker.scoreboard()` had already solved this one step earlier by computing `cap@k` and `oracle@k`
+from its artifact, with `test_reranker.py:298` asserting them. I did not copy it.
+
+**What caught it.** Being asked whether Step 5 was actually ready for Step 6, and checking rather than
+recalling. `grep` for the constants found them defined in `src/` and referenced by a test that
+compared them to themselves.
+
+**What I changed.**
+
+- `DONE` `oracle_for_row`, `edge_reachable` and `anchor_fillable` live in `template_selector.py`;
+  `scoreboard()` returns `oracle`, `ceiling_edge` and `ceiling_anchor`. **No ceiling or oracle literal
+  remains anywhere in `src/`** — the published values are now assertions in
+  `test_the_ceilings_and_oracle_are_what_the_docs_claim`, mirroring `test_reranker.py:298`.
+- `DONE` `test_no_arm_exceeds_the_oracle` makes the invariant structural: an arm cannot reach a gold
+  chunk no fillable template reaches, so a violation means the oracle computation is wrong rather than
+  a number needing an update.
+- `DONE` `--rebuild` re-executes the committed plans against the graph with **no API key and no
+  spend**, because R7B is not reproducible at `temperature=0, seed=42` and a `--refresh` would have
+  moved every number ADR-0013 quotes for a change that has nothing to do with the model. The artifact
+  now separates *what the model said* from *what the graph did with it*; the second is replayable and
+  `test_the_artifact_rebuilds_from_its_own_plans` proves it. Verified on the rebuild: **0 drift in the
+  model fields, 0 drift in the graph fields.**
+- `DONE` `error` split into `error` (selector-side, replayed) and `exec_error` (graph-side,
+  recomputed), so a stale execution failure cannot be preserved as though the model had caused it.
+- The recomputed numbers came back **24 / 9 / 9** — the transcription was correct, so no published
+  figure changed. That is luck, not process, and it is why this is recorded rather than quietly fixed.
+
+**What I learned.** I wrote "a change is `DONE` only if code in this repo enforces it" into the
+recurrence tracker as instance four of this exact failure, in the same commit where I committed
+instance five. The pre-registration discipline caught two real defects this step — a metric with a 90%
+floor, and a model that cannot spell graph keys — and I then left the evidence for both in a folder
+Windows deletes. **A measurement that lives outside the repository is a claim, not a result**, however
+carefully it was made.
+
+There is a smaller, more uncomfortable version: I checked whether Step 5's *findings* were sound far
+more carefully than whether Step 5's *record* of them was reproducible. The first is what makes the
+work interesting; the second is what makes it work.

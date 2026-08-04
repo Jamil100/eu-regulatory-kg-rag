@@ -82,6 +82,16 @@ The rules arm reaches the oracle exactly. It is permitted up to 3 calls per
 question and matched the best *single* call without beating it, so combining
 templates bought nothing on this set.
 
+Every figure in this ADR is recomputed from `eval/selector-eval.jsonl` by
+`template_selector.scoreboard()` and asserted by
+`test_the_ceilings_and_oracle_are_what_the_docs_claim`. The oracle in particular
+is measured during the sweep — it needs 29 template executions and cannot be
+derived from the plans alone — and `test_no_arm_exceeds_the_oracle` makes
+exceeding it a structural impossibility rather than a number anyone can re-type.
+`--rebuild` re-derives all of it from the committed plans with no API key, so the
+graph-side numbers can be corrected without re-asking a model that would answer
+differently.
+
 ## Why R7B lost, which is not the reason ADR-0012's R7B lost
 
 The router's R7B failed at classification — it never emitted `both` at all. This

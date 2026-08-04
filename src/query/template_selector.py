@@ -564,24 +564,114 @@ def routed_rows(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r["route"] in ("graph", "both")]
 
 
+# --------------------------------------------------------------------------
+# The pre-registration, as code
+#
+# These three were measured before either arm existed and then, for one commit,
+# lived in this module as hand-typed constants -- which is exactly what
+# docs/failure-notes.md line 7 says does not count as DONE, and one step below
+# the standard `reranker.scoreboard()` already set by computing `cap@k` and
+# `oracle@k` from its artifact. They are computed here now, and the published
+# values live in tests/test_template_selector.py as assertions rather than as
+# sources.
+#
+# `edge_reachable` and `anchor_fillable` are cheap and pure. The oracle is
+# neither: it needs every fillable (template, anchor) pair executed against the
+# graph, so like Step 4's stored top-50 it is measured during the sweep and
+# carried in the artifact, letting `scoreboard` stay database-free.
+# --------------------------------------------------------------------------
+
+def _fillable(entities: list[LinkedEntity], template: str) -> list[LinkedEntity]:
+    """The linked entities that can fill `template`'s single declared parameter.
+
+    `path_between` is excluded by callers: it accepts every type on both ends,
+    so counting it would make "can the linker fill a template" vacuously true.
+    """
+    allowed = next(iter(TEMPLATE_ANCHORS[template].values()))
+    return [e for e in entities if e.type in allowed]
+
+
+def _single_param_templates() -> list[str]:
+    return [n for n in sorted(TEMPLATE_ANCHORS) if n != "path_between"]
+
+
+def edge_reachable(row: dict) -> bool:
+    """Does any template traverse an edge this row declares?"""
+    edges = set(row["ontology_edges"])
+    return any(TEMPLATE_EDGES[n] & edges for n in TEMPLATES)
+
+
+def anchor_fillable(entities: list[LinkedEntity]) -> bool:
+    """Can the linker fill any template's parameter for this question?"""
+    return any(_fillable(entities, n) for n in _single_param_templates())
+
+
+def oracle_for_row(
+    row: dict, entities: list[LinkedEntity], driver: Driver
+) -> tuple[int, dict[str, str] | None]:
+    """The best (template, anchor) pair for one row, chosen WITH the gold visible.
+
+    This is the ceiling a perfect selector could reach on this row, and measuring
+    it is what lets a weak result be blamed on selection rather than on the graph
+    simply not holding the gold. Gated on the declared edges for the same reason
+    the pre-registration was: a template that traverses nothing the row declares
+    is not a candidate a selector should have found.
+
+    Deliberately the best *single* call, not the best combination. The adopted
+    rules may emit up to MAX_CALLS, so they are allowed to beat this; that they
+    exactly match it is a finding rather than an arithmetic certainty.
+    """
+    gold = set(row["source_chunk_ids"])
+    edges = set(row["ontology_edges"])
+    best_hits, best_choice = 0, None
+    for template in _single_param_templates():
+        if not (TEMPLATE_EDGES[template] & edges):
+            continue
+        param = next(iter(TEMPLATE_ANCHORS[template]))
+        for entity in _fillable(entities, template):
+            found = run_template(template, {param: entity.canonical_name}, driver)
+            chunks = {c for r in found for c in provenance_of(r)}
+            hits = len(gold & chunks)
+            if hits > best_hits:
+                best_hits = hits
+                best_choice = {"template": template, "anchor": entity.canonical_name}
+    return best_hits, best_choice
+
+
 def sweep(
     rows: list[dict],
     arms: tuple[str, ...] = ARMS,
     driver: Driver | None = None,
     client: Any | None = None,
     conn: Any | None = None,
+    plans: dict[tuple[str, str], dict] | None = None,
 ) -> list[dict]:
     """Run both arms over the eval set, execute what they select, and render it.
 
     The only impure part. Executes each plan so the artifact carries what the
-    graph actually returned -- rows, provenance, the gold intersection, and the
-    number of statements the rows rendered into -- which is what lets
-    `scoreboard` recompute every published number with no database and no key.
+    graph actually returned -- rows, provenance, the gold intersection, the
+    number of statements the rows rendered into, and the oracle -- which is what
+    lets `scoreboard` recompute every published number with no database and no
+    key.
 
     Rendering is included rather than left to a second pass because "how many
     questions can the graph path answer at all" is a statement count, not a row
     count: 169 rows carrying one repeated fact is one statement, and reporting
     the row count as reach would restate the hot fact as a result.
+
+    THE ARTIFACT HOLDS TWO KINDS OF THING, AND `plans` IS THE SEAM.
+
+      * What the model said -- `plan`, `rule`, `raw`, `cost_usd`, `latency_ms`,
+        `attempts`, `error`. Costs money, and R7B is **not reproducible** at
+        `temperature=0, seed=42` (two sweeps gave 16 then 14 gold hits), so it is
+        recorded once and never regenerated casually.
+      * What the graph did with it -- everything else. Fully deterministic given
+        a plan and a loaded graph.
+
+    Passing `plans` (keyed by `(id, arm)`) replays the first group instead of
+    re-deriving it and recomputes the second, which is what `--rebuild` does: it
+    adds or corrects graph-side fields with no API key, no spend, and without
+    moving a single number ADR-0013 quotes.
     """
     from src.answer.path_to_prose import path_to_prose
     from src.query.graph_path import label_map
@@ -596,9 +686,31 @@ def sweep(
     artifact: list[dict] = []
     try:
         for row in rows:
+            entities = link_detailed(row["question"], index)
+            oracle_hits, oracle_choice = 0, None
+            if row["route"] in ("graph", "both"):
+                oracle_hits, oracle_choice = oracle_for_row(row, entities, driver)
+
             for arm in arms:
-                if arm == "rules":
-                    result = select_by_rules(row["question"], index)
+                recorded = (plans or {}).get((row["id"], arm))
+                if recorded is not None:
+                    result = SelectorResult(
+                        plan=[
+                            TemplateCall(
+                                template=c["template"], params=c["params"], rule=c["rule"]
+                            )
+                            for c in recorded["plan"]
+                        ],
+                        rule=recorded["rule"],
+                        raw=recorded["raw"],
+                        latency_ms=recorded["latency_ms"],
+                        cost_usd=recorded["cost_usd"],
+                        error=recorded.get("error"),
+                        attempts=recorded.get("attempts", 1),
+                        linked=entities,
+                    )
+                elif arm == "rules":
+                    result = select_by_rules(row["question"], index, entities)
                 else:
                     result = select_by_model(row["question"], client)
 
@@ -667,10 +779,23 @@ def sweep(
                         "docs_rendered": len(statements),
                         "docs_derived": derived_docs,
                         "docs_annex_caveated": caveated,
+                        # The pre-registration, carried per row so `scoreboard`
+                        # can sum it without a database. `oracle_hits` is the
+                        # best single (template, anchor) pair for this row,
+                        # chosen with the gold visible.
+                        "oracle_hits": oracle_hits,
+                        "oracle_choice": oracle_choice,
+                        "edge_reachable": edge_reachable(row),
+                        "anchor_fillable": anchor_fillable(entities),
                         "latency_ms": round(result.latency_ms, 2),
                         "attempts": result.attempts,
                         "cost_usd": result.cost_usd,
-                        "error": result.error or exec_error,
+                        # Split so `--rebuild` can replay the selector half and
+                        # recompute the graph half. Merging them meant a stale
+                        # execution failure would be preserved as though it were
+                        # something the model did.
+                        "error": result.error,
+                        "exec_error": exec_error,
                     }
                 )
     finally:
@@ -731,6 +856,7 @@ def scoreboard(rows: list[dict], artifact: list[dict]) -> dict[str, Any]:
             "rows_answerable": sum(1 for e in entries if e.get("docs_rendered", 0)),
             "docs_upper_bound": sum(len(e["provenance"]) for e in entries),
             "errors": sum(1 for e in entries if e["error"]),
+            "exec_errors": sum(1 for e in entries if e.get("exec_error")),
             "retried": [e["id"] for e in entries if e.get("attempts", 1) > 1],
             "cost_usd": sum(e["cost_usd"] or 0.0 for e in entries),
             "latency_ms": sorted(
@@ -746,25 +872,28 @@ def scoreboard(rows: list[dict], artifact: list[dict]) -> dict[str, Any]:
         )
         for name in CONSTANT_ARMS
     }
+
+    # The pre-registration, recomputed rather than recalled. One entry per row
+    # per arm carries these identically, so read them off whichever arm is
+    # present rather than double-counting.
+    #
+    # ONE DENOMINATOR, AND MIXING TWO IS A DEFECT THIS FILE ALREADY COMMITTED
+    # ONCE. The router sends 10 rows to the graph, but `3h-002` carries
+    # `expected_fail` (ADR-0007) and `bucket_of` drops it, so 9 are scored. An
+    # earlier `_report` printed "Ceiling 10 of 9" -- the routed-set ceiling over
+    # the scored-set denominator, a ratio above 1 that reads as slack which does
+    # not exist. Everything here is on the scored set; the routed-set figures
+    # live in the module docstring where nothing can divide them.
+    first = {e["id"]: e for e in artifact if e["selector"] == ARMS[0] and e["id"] in scored}
+    board["oracle"] = sum(e.get("oracle_hits", 0) for e in first.values())
+    board["oracle_choices"] = {
+        rid: e.get("oracle_choice") for rid, e in sorted(first.items())
+    }
+    board["ceiling_edge"] = sum(1 for e in first.values() if e.get("edge_reachable"))
+    board["ceiling_anchor"] = sum(1 for e in first.values() if e.get("anchor_fillable"))
+    board["gold_total"] = sum(len(e["gold"]) for e in first.values())
     board["_n_scored"] = len(scored)
     return board
-
-
-# Measured 2026-08-04 by the pre-registration scripts, BEFORE either arm existed.
-# A regression below these is a defect; a number above them is impossible.
-#
-# TWO DENOMINATORS, AND MIXING THEM IS A DEFECT THIS FILE ALREADY COMMITTED ONCE.
-# The router sends 10 rows to the graph, but `3h-002` carries `expected_fail`
-# (ADR-0007: the extractor emitted PERMITS where EXEMPT_FROM was required) and
-# `bucket_of` drops it, so 9 rows are scored. The first version of `_report`
-# printed "Ceiling 10 of 9" -- the routed-set ceiling over the scored-set
-# denominator -- which is a ratio above 1 and would have been read as slack that
-# does not exist. Every constant below is on the SCORED set; the routed-set
-# figures live in the module docstring where they cannot be divided by anything.
-ORACLE_GOLD_HITS = 24  # of 32, over the 9 scored rows (25 of 35 over all 10 routed)
-ORACLE_GOLD_TOTAL = 32
-CEILING_EDGE = 9  # a template traverses a declared edge, 9 of 9 scored
-CEILING_ANCHOR = 9  # the linker can fill that template, 9 of 9 scored
 
 
 def _report(rows: list[dict], artifact: list[dict]) -> int:
@@ -782,16 +911,21 @@ def _report(rows: list[dict], artifact: list[dict]) -> int:
             f"{arm:8} {a['gold_hit']:>4} of {a['gold_total']:<3} {a['rows_with_a_hit']:>8} of {n:<2} "
             f"{a['calls']:>6} {a['empty_calls']:>8} of {a['calls']:<2} {a['edge_hit']:>7} of {n:<2} {a['errors']:>7}"
         )
-    print(f"{'ORACLE':8} {ORACLE_GOLD_HITS:>4} of {ORACLE_GOLD_TOTAL:<3}   (best single call per row, chosen with the gold visible)")
+    print(
+        f"{'ORACLE':8} {board['oracle']:>4} of {board['gold_total']:<3}   "
+        f"(best single call per row, chosen with the gold visible)"
+    )
 
     print("\nEDGE-INTERSECTION IS REPORTED WITH ITS CONSTANTS, BECAUSE IT IS NEARLY USELESS")
-    print("-" * 72)
+    print("-" * 76)
     for name, hits in sorted(board["_constants"].items(), key=lambda kv: -kv[1]):
         print(f"  always-{name:24} {hits:>2} of {n}")
     print(
-        f"\n  Ceiling {CEILING_EDGE} of {n}, best constant "
-        f"{max(board['_constants'].values())} of {n}. About one row of discriminating\n"
-        f"  power, measured before either arm was written. Gold yield is the headline."
+        f"\n  Ceiling {board['ceiling_edge']} of {n} (a template traverses a declared edge); "
+        f"the linker can\n  fill one on {board['ceiling_anchor']} of {n}. Best constant "
+        f"{max(board['_constants'].values())} of {n} -- about one row of\n"
+        f"  discriminating power, measured before either arm was written. Gold yield is\n"
+        f"  the headline, and all three of these are recomputed here, not recalled."
     )
 
     print("\nCALLS THAT VALIDATED AND RETURNED NOTHING")
@@ -859,11 +993,19 @@ def main() -> int:
         action="store_true",
         help=f"re-run both arms live and rewrite {ARTIFACT.name} (needs an API key, ~$0.001)",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="re-execute the committed plans against the graph and rewrite the "
+        "graph-side fields; no API key, no spend, model answers untouched",
+    )
     parser.add_argument("--json", action="store_true", help="raw result as JSON")
     args = parser.parse_args()
 
-    if not args.question and not args.eval:
-        parser.error("pass --question or --eval")
+    if not args.question and not args.eval and not args.rebuild:
+        parser.error("pass --question, --eval or --rebuild")
+    if args.refresh and args.rebuild:
+        parser.error("--refresh re-asks the model; --rebuild replays it. Pick one.")
 
     if args.question:
         rules = select_by_rules(args.question)
@@ -902,13 +1044,18 @@ def main() -> int:
     rows = load_questions()
     if args.refresh:
         artifact = sweep(rows)
+    elif args.rebuild:
+        recorded = {(e["id"], e["selector"]): e for e in load_artifact()}
+        artifact = sweep(rows, plans=recorded)
+    else:
+        artifact = load_artifact()
+
+    if args.refresh or args.rebuild:
         ARTIFACT.write_text(
             "\n".join(json.dumps(e, ensure_ascii=False) for e in artifact) + "\n",
             encoding="utf-8",
         )
         print(f"wrote {len(artifact)} rows to {ARTIFACT}\n")
-    else:
-        artifact = load_artifact()
     return _report(rows, artifact)
 
 

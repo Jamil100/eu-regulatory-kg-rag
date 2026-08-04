@@ -38,6 +38,7 @@ python -m src.query.reranker  --question "..."       # retrieve then rerank
 pytest tests/test_retriever.py tests/test_reranker.py
 
 python -m src.query.template_selector --eval           # the graph table, from the artifact
+python -m src.query.template_selector --rebuild        # re-execute committed plans; no key, no spend
 python -m src.query.template_selector --eval --refresh # re-run both arms live (~$0.001)
 python -m src.query.template_selector --question "..." # both arms, one question
 python -m src.query.graph_path --question "..."        # select, execute, render
@@ -505,6 +506,11 @@ The phase plan says selection accuracy is measurable against each row's
 | `always-obligations_for_system`, by edge-intersection | **8 of 9** |
 | `always-obligations_for_role` | 7 of 9 |
 
+All three figures are **recomputed by `scoreboard()`** from the artifact and asserted by
+`test_the_ceilings_and_oracle_are_what_the_docs_claim`, the same arrangement `test_reranker.py:298`
+has for its caps and oracle. For one commit they were hand-typed literals in `src/`; that is recorded
+in the failure-notes addendum for this step.
+
 Ceiling 9, floor 8 — about one row of discriminating power. `obligations_for_role`
 and `obligations_for_system` between them traverse `APPLIES_TO`, `IMPOSES` and
 `CLASSIFIED_AS`, which nearly every row declares, so a selector that emits one of
@@ -614,6 +620,7 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
 | The selector shipped with no retry, unlike every other API call site | `th-004` came back a 429 from a 20-calls/minute trial key, scoring the arm under measurement a zero that was the key's fault | `_chat_call` wrapped in the same tenacity policy as `embedder._embed_call`; `attempts` recorded per call and excluded from the p50 |
 | `_report` printed "Ceiling 10 of 9" | the routed-set ceiling (10 rows) divided by the scored-set denominator (9 rows, after `expected_fail`) — a ratio above 1 that reads as slack | every constant restated on the scored set; the routed-set figures live in the module docstring where nothing can divide them |
 | The plan asserted `RiskCategory` over-claims in `router.ANCHOR_TYPES` | it does not — `definition_of`'s `(t:Entity)` head accepts it | the disagreement is one-directional and is 6 types the router *excludes* that do fill a parameter; pinned by a test |
+| The pre-registered ceiling and oracle were computed outside the repo | three scripts in a temp directory, transcribed into `src/` as literals; `test_rules_reaches_the_oracle` compared a constant to itself | `scoreboard()` computes all three; no literal remains in `src/`; `test_no_arm_exceeds_the_oracle` makes the invariant structural; `--rebuild` replays the model half and recomputes the graph half with no key |
 
 ## Open
 

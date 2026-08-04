@@ -488,6 +488,15 @@ Phase 5.
 > traverses** (6 of the ontology's 13 relation types are typed-unreachable). Same shape as Step 4's
 > finding that ranking rather than retrieval bound the vector path.
 >
+> **The pre-registration was itself unencoded, and that was fixed after the fact.** The ceiling and
+> oracle were first computed by scripts in a temp directory outside the repo and transcribed into
+> `src/` as literals, so `test_rules_reaches_the_oracle` compared a constant to itself.
+> `scoreboard()` now computes `oracle`, `ceiling_edge` and `ceiling_anchor`; **no such literal remains
+> in `src/`**; `test_no_arm_exceeds_the_oracle` makes the invariant structural; and `--rebuild`
+> re-executes the committed plans with **no API key and no spend** (verified: 0 drift in both the model
+> and graph halves), because R7B would answer differently if re-asked. Recomputed values came back
+> **24 / 9 / 9** — the transcription was correct, so nothing published moved. Suite **326 → 329**.
+>
 > **Scope notes.** The hot fact is capped structurally: one statement per relationship *leg*, deduped,
 > so 169 rows render **one** classification statement citing 3 provisions and saying `+121 more`
 > (asserted against both synthetic and live rows). `path_to_prose` was widened to

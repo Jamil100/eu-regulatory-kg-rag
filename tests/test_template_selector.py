@@ -25,6 +25,18 @@ GOLD_TOTAL = 32
 SCORED_ROWS = 9
 BEST_CONSTANT = 8  # always-obligations_for_system, by edge-intersection
 
+# The pre-registration, published in ADR-0013 and docs/metrics/query-path.md.
+#
+# These live HERE, in the test, and not in `src/` -- which is the whole point of
+# the follow-up that added them. For one commit they were hand-typed constants in
+# `template_selector.py` that nothing recomputed, so `test_rules_reaches_the_oracle`
+# was asserting `24 == 24` with the right-hand side typed by me. `scoreboard()` now
+# computes all three from the artifact, and these are the assertions against it --
+# the same arrangement `tests/test_reranker.py` has with CAPS and ORACLE.
+ORACLE = 24  # best single (template, anchor) per row, chosen with the gold visible
+CEILING_EDGE = 9  # a template traverses a declared edge, of 9 scored
+CEILING_ANCHOR = 9  # the linker can fill that template, of 9 scored
+
 # R7B's figure is a SINGLE SAMPLE and is asserted as a bound, not an equality.
 # Two sweeps of the same 23 questions at `temperature=0, seed=42` returned 16 and
 # then 14 gold hits, with the plan itself differing on several rows -- Cohere's
@@ -319,13 +331,44 @@ def test_the_derived_flag_is_inert_on_this_eval_set(board) -> None:
     )
 
 
+def test_the_ceilings_and_oracle_are_what_the_docs_claim(board) -> None:
+    """The pre-registration, recomputed rather than recalled.
+
+    Named and shaped after `test_reranker.py`'s
+    `test_the_ceilings_and_oracle_are_what_query_path_md_claims`, which this file
+    should have copied the first time. Every figure here is now computed by
+    `scoreboard()` from the artifact; these literals are the published claim in
+    ADR-0013 and query-path.md, and this test is what ties the two together.
+    """
+    assert board["oracle"] == ORACLE
+    assert board["ceiling_edge"] == CEILING_EDGE
+    assert board["ceiling_anchor"] == CEILING_ANCHOR
+    assert board["gold_total"] == GOLD_TOTAL
+
+
+def test_no_arm_exceeds_the_oracle(board) -> None:
+    """A structural invariant, not a measurement.
+
+    No selector can reach a gold chunk that no fillable template reaches, so this
+    cannot be satisfied by editing a number -- which is exactly what a hand-typed
+    oracle invited. If an arm ever exceeds it, the oracle computation is wrong,
+    not the arm.
+    """
+    for arm in ts.ARMS:
+        assert board[arm]["gold_hit"] <= board["oracle"], arm
+
+
 def test_rules_reaches_the_oracle(board) -> None:
     """The deterministic arm matches the best single call per row, chosen with the
     gold visible. Selection is therefore NOT the binding constraint on this eval
     set -- what the templates can reach at all is. Same shape as Step 4's finding
-    that ranking rather than retrieval bound the vector path."""
-    assert board["rules"]["gold_hit"] == ts.ORACLE_GOLD_HITS
-    assert ts.ORACLE_GOLD_TOTAL == GOLD_TOTAL
+    that ranking rather than retrieval bound the vector path.
+
+    The rules may emit up to MAX_CALLS, so equalling a best-*single*-call oracle
+    is a finding rather than an arithmetic certainty: combining templates bought
+    nothing here.
+    """
+    assert board["rules"]["gold_hit"] == board["oracle"]
 
 
 def test_the_edge_metric_is_beaten_by_a_constant(board) -> None:
@@ -380,3 +423,34 @@ def test_every_selected_call_executes(loaded, rows) -> None:
     for row in rows:
         for call in ts.select_by_rules(row["question"], index).plan:
             run_template(call.template, call.params, loaded)
+
+
+def test_the_artifact_rebuilds_from_its_own_plans(loaded, indexed, rows, artifact) -> None:
+    """The graph half of the artifact is reproducible; the model half is not.
+
+    R7B cannot have `test_the_rules_arm_still_reproduces_the_artifact` -- two
+    sweeps at `temperature=0, seed=42` gave different plans. But everything
+    downstream of a plan is deterministic given a loaded graph, and that is what
+    `--rebuild` exploits to recompute graph-side fields without re-asking (or
+    re-paying) the model. This test is the guarantee that it does.
+    """
+    recorded = {(e["id"], e["selector"]): e for e in artifact}
+    rebuilt = ts.sweep(rows, driver=loaded, conn=indexed, plans=recorded)
+
+    graph_fields = [
+        "gold_hits", "provenance", "rows_returned", "empty_calls",
+        "docs_rendered", "docs_derived", "docs_annex_caveated",
+        "oracle_hits", "oracle_choice", "edge_reachable", "anchor_fillable",
+    ]
+    model_fields = ["plan", "rule", "raw", "cost_usd", "latency_ms", "attempts"]
+
+    assert len(rebuilt) == len(artifact)
+    for entry in rebuilt:
+        before = recorded[(entry["id"], entry["selector"])]
+        for field in graph_fields:
+            assert entry[field] == before[field], f'{entry["id"]}/{entry["selector"]}.{field}'
+        for field in model_fields:
+            assert entry[field] == before[field], (
+                f'{entry["id"]}/{entry["selector"]}.{field} moved -- a rebuild must '
+                f"replay the model, never re-ask it"
+            )
