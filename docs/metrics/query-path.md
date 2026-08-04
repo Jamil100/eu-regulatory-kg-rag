@@ -6,8 +6,12 @@ entity set (64% excluding instrument nodes). Routing is deterministic: 21 of 22
 rows, $0.00, 3.5 ms — Command R7B scored 10 of 22, below the majority-class
 constant, and never emitted `both` at all. Rerank 3.5 over the top-50 lifts micro
 recall from 23/51 to 27/51 at k=5 and 28/51 to 31/51 at k=10 — a real aggregate
-gain, and not one per-stratum move clears this eval set's own resolution.**
-Phase 3 Steps 2–4 complete. Steps 5–7 append here.
+gain, and not one per-stratum move clears this eval set's own resolution. The
+graph path now runs end to end: deterministic template selection reaches **24 of
+32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
+and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
+rows at all.**
+Phase 3 Steps 2–5 complete. Steps 6–7 append here.
 
 Fifth companion to `extraction-cost-and-findings.md` (what came out of the
 model), `graph-load.md` (what came out of the loader), `eval-set.md` (the
@@ -32,6 +36,13 @@ python -m src.query.reranker --eval --refresh        # re-run live (~$0.05)
 python -m src.query.retriever --question "..."       # top-50, no rerank
 python -m src.query.reranker  --question "..."       # retrieve then rerank
 pytest tests/test_retriever.py tests/test_reranker.py
+
+python -m src.query.template_selector --eval           # the graph table, from the artifact
+python -m src.query.template_selector --eval --refresh # re-run both arms live (~$0.001)
+python -m src.query.template_selector --question "..." # both arms, one question
+python -m src.query.graph_path --question "..."        # select, execute, render
+python -m src.query.graph_query --baseline             # the six row-count anchors
+pytest tests/test_template_selector.py tests/test_path_to_prose.py
 ```
 
 ---
@@ -462,8 +473,182 @@ plan on rerank confidence as a refusal input.
 | The sweep embedded each question separately | 46 API calls where 24 would do, and the k-matrix arms could have seen different vectors | one batched `embed_texts` call, vectors handed to `retrieve_detailed(vector=...)` |
 | Rerank p95 read 83 s and looked like a model figure | retry-vs-stall was indistinguishable in the artifact | `attempts` recorded per call; stalls listed by name, never averaged into a percentile |
 
+## Graph path: template selection, execution, and prose
+
+The router sends **10 of 23** rows to the graph (9 `both`, 1 `graph`); `3h-002`
+carries `expected_fail` (ADR-0007) and drops out, so **9 rows are scored**. Two
+selector arms were built and measured, as ADR-0012 did for routing: deterministic
+rules over the linked entities, and Command R7B choosing a template name and
+filling its parameters, which is ADR-0002's literal wording.
+
+| arm | gold hits | rows with a hit | calls | 0-row calls | cost | p50 |
+|---|---|---|---|---|---|---|
+| **rules** (adopted) | **24 of 32** | 8 of 9 | 18 | 2 of 18 | **$0.00** | **5.7 ms** |
+| R7B | 14 of 32 | 4 of 9 | 9 | **4 of 9** | $0.000159 | 951 ms |
+| *oracle* | *24 of 32* | — | — | — | — | — |
+
+Gold yield is the headline: does the executed plan's provenance contain the row's
+gold `source_chunk_ids`? It is the same ground truth Step 4 scored the vector path
+on, and unlike the metric this step was handed it is not gameable by a constant.
+
+### The metric the plan specified does not work, and that was measured first
+
+The phase plan says selection accuracy is measurable against each row's
+`ontology_edges`. It is computable and it is nearly uninformative. Measured
+**before either arm existed**:
+
+| | value |
+|---|---|
+| a template traverses a declared edge | **9 of 9** |
+| the linker can fill that template | **9 of 9** |
+| both hold, for the same template | **9 of 9** |
+| `always-obligations_for_system`, by edge-intersection | **8 of 9** |
+| `always-obligations_for_role` | 7 of 9 |
+
+Ceiling 9, floor 8 — about one row of discriminating power. `obligations_for_role`
+and `obligations_for_system` between them traverse `APPLIES_TO`, `IMPOSES` and
+`CLASSIFIED_AS`, which nearly every row declares, so a selector that emits one of
+them unconditionally scores 89%. This is precisely the shape ADR-0012 caught R7B
+with — a classifier beaten by the majority-class constant — and the only reason it
+is a caveat here rather than a headline is that the constants were computed before
+an arm was written. The figure is still reported, always beside its constants.
+
+Six of the ontology's 13 relation types are traversable by **no typed template**:
+`REFERENCES`, `LISTED_IN`, `SETS_PENALTY`, `EXEMPT_FROM`, `PERMITS`, `GRANTS`.
+`REFERENCES` and `LISTED_IN` are the #2 and #4 most-declared edges on the eval set.
+`path_between` is `[*..4]` and untyped, and is their only cover.
+
+### The rules reach the oracle, so selection is not the binding constraint
+
+The oracle — the best single `(template, anchor)` pair per row, chosen with the
+gold visible — is **24 of 32**, and the rules arm returns exactly that. It is
+allowed up to 3 calls per question and matched the best single call without
+beating it, so combining templates bought nothing on this set.
+
+That makes the constraint what the six templates can reach at all, not which one
+gets picked. It is the same shape as Step 4's finding that ranking rather than
+candidate retrieval bound the vector path — and it means a better selector is not
+the lever here. The missing 8 chunks sit behind `REFERENCES` and `LISTED_IN`.
+
+### `ag-001` is the row the graph exists for
+
+| row | stratum | gold | rules | what the vector path can do |
+|---|---|---|---|---|
+| `ag-001` | aggregation | 11 | **11** | top-10 similarity cannot return 11 rows |
+
+Per stratum, gold hits against gold available:
+
+| stratum | rules | R7B |
+|---|---|---|
+| aggregation | **13 / 13** | 11 / 13 |
+| two-hop | 7 / 10 | 2 / 10 |
+| cross-regulation | 3 / 6 | 1 / 6 |
+| three-hop | 1 / 3 | 0 / 3 |
+
+Two-hop and aggregation are the two strata ADR-0001's argument rests on, and they
+are the two the graph path does best on. **This is not yet a comparison** — Phase
+5 runs the three-way benchmark, and these numbers are provenance coverage, not
+answer accuracy.
+
+### R7B's failure is parameter values, not template choice
+
+This is the finding, and it is sharper than "the small model was worse". R7B
+generally picked reasonable templates. What it could not do is fill them:
+
+| what R7B produced | rows returned | the key the graph holds | rows |
+|---|---|---|---|
+| `system_type=high-risk AI system` | **0** | `high risk ai system` | 169 |
+| `article=gdpr` | **0** | `GDPR` | 29 |
+| `system_type=narrow procedural task` | **0** | — | — |
+
+**4 of its 9 calls matched no node.** Those calls all pass `validate()`, because
+validation checks parameter *names* and the graph matches parameter *values* —
+ADR-0002's boundary is doing exactly its job and is silent on this by design. The
+model produces display-form English; the graph is keyed on `normalize()` output,
+lowercased and de-hyphenated except where `ABBREVIATIONS` forces uppercase. That
+mapping is not guessable from the question, which is the entity linker's whole
+reason to exist.
+
+R7B also emitted two calls mixing parameters from two templates
+(`obligations_for_role role=importer system_type=high-risk AI system`) — rejected
+by `validate()`, which is the first time that guard has fired on real model output
+rather than on a synthetic injection test.
+
+### The model arm is not reproducible, and the rules arm has a test proving it is
+
+Two sweeps of the same 23 questions at `temperature=0, seed=42` returned **16 then
+14** gold hits, with the plans differing on several rows: Cohere's `seed` is
+best-effort. The rules arm is pinned by
+`test_the_rules_arm_still_reproduces_the_artifact`, which re-derives every plan
+and compares byte-for-byte. A number that moves between identical runs cannot
+anchor an ADR, so ADR-0013 quotes the committed artifact and states the spread.
+
+### What actually reaches a prompt
+
+| | rules | R7B |
+|---|---|---|
+| rows answerable | **9 of 9** | 5 of 9 |
+| Neo4j rows returned | 1,684 | 332 |
+| **statements rendered** | **2,886** | 617 |
+| carrying an Annex VIII/XI caveat | 6 | 0 |
+| built on a derived edge | **0** | 0 |
+
+Statements, not rows, is the honest unit. The 169 rows of
+`obligations_for_system('high risk ai system')` carry **one** classification fact
+asserted by 124 chunks, and per-leg rendering emits it once — reporting 169 would
+be the hot fact restated as a result, which is what `graph-load.md:225` warned
+this step about. The live check: 169 rows → 316 statements → **1** classification
+statement, citing 3 provisions and saying `+121 more`.
+
+**The derived flag is inert on this eval set and is reported as inert.** It works —
+`AIA Annex VIII interacts with GDPR Art. 35` renders `derived=True` beside the
+asserted `interacts with GDPR` at `derived=False`, from the same chunk — but no
+selected plan over these 23 questions traverses one of ADR-0010's 22 bridges. A
+test asserts the zero, so the day a question reaches one, it has to be written
+down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
+
+### Defects found on the way in
+
+| Defect | Symptom | Fix |
+|---|---|---|
+| The selector shipped with no retry, unlike every other API call site | `th-004` came back a 429 from a 20-calls/minute trial key, scoring the arm under measurement a zero that was the key's fault | `_chat_call` wrapped in the same tenacity policy as `embedder._embed_call`; `attempts` recorded per call and excluded from the p50 |
+| `_report` printed "Ceiling 10 of 9" | the routed-set ceiling (10 rows) divided by the scored-set denominator (9 rows, after `expected_fail`) — a ratio above 1 that reads as slack | every constant restated on the scored set; the routed-set figures live in the module docstring where nothing can divide them |
+| The plan asserted `RiskCategory` over-claims in `router.ANCHOR_TYPES` | it does not — `definition_of`'s `(t:Entity)` head accepts it | the disagreement is one-directional and is 6 types the router *excludes* that do fill a parameter; pinned by a test |
+
 ## Open
 
+- **The graph path emits 2,886 statements over 9 questions — ~320 per question —
+  and Step 6 cannot put that in a prompt.** Gold coverage is there; precision is
+  not. `obligations_for_role('provider')` alone is 210 rows. Nothing in this step
+  ranks statements, because there is no score to rank them by: `ContextDoc.score`
+  is `None` on a graph document by design, and the two source scales are not
+  comparable (`retriever.py:26-30`). Step 6 has to decide between reranking the
+  statements as documents, capping per template, or scoring by anchor distance —
+  and it is the largest open item on this path.
+- **The oracle is the constraint, not the selector.** The rules arm already
+  reaches the best single call per row. The 8 unreached gold chunks sit behind
+  `REFERENCES` and `LISTED_IN`, which no typed template traverses. A seventh
+  template — or a typed `path_between` — is the lever, not a smarter selector.
+- **`router.ANCHOR_TYPES` excludes 6 types that do fill a declared parameter**:
+  `Authority`, `DefinedTerm`, `LawfulBasis`, `Penalty`, `Regulation`, `Right`. Its
+  comment says "none is a parameter any template declares", which is true of the
+  three typed templates and false of `definition_of`, whose head is `(t:Entity)`.
+  The router is **deliberately unchanged** — ADR-0012's adopted 21 of 22 was
+  measured with the current set, and editing it silently re-measures Step 3. A
+  step that can afford to re-run the router sweep should widen it and see whether
+  R2 still fires the same way.
+- **Every number here is provenance coverage, not answer accuracy.** A gold chunk
+  appearing in a statement's citation list is not the same as the answer being
+  right. Phase 5's judge is what closes that gap.
+- **The graph path's statements carry no statute text.** A `ContextDoc` from this
+  path holds the rendered statement and a citation label, by decision. On `both`
+  the passage text arrives via the vector path; on `graph` — `ag-001` alone —
+  Command A will see statements and no legislative prose. Whether that is enough
+  to generate from is a Step 6 question and is untested here.
+- **`path_between` is measured at zero.** It is the only cover for the 6
+  untraversable relation types and the rules arm never fired it: S6 only triggers
+  when nothing else matched, and something else always matched. Its provenance is
+  also one arbitrary chunk per hop where parallel edges exist.
 - **Rerank leaves 10 of 13 available chunks unrecovered**, and nothing here
   explains why. The candidate pool is not the constraint — that is measured — so
   the next lever is chunking (ADR-0003) or a different ranking signal, not a
@@ -513,11 +698,18 @@ plan on rerank confidence as a refusal input.
   because `ai system` is in the same shape and *is* a gold entity for `3h-002`, so
   a blanket filter would cost real links. Any filter needs a stated rule and a
   measured cost, not a hand-picked list.
-- **Precision has no upper reference.** 52% (64% excluding instruments) is the
+- ~~**Precision has no upper reference.** 52% (64% excluding instruments) is the
   first measurement of anything on this path; nothing says whether it is good.
   Step 5's template-selection accuracy against `ontology_edges` is the first
   number that will constrain it, because a wrong link there is a zero-row query
-  rather than a slightly worse prompt.
+  rather than a slightly worse prompt.~~ → **Answered, and not by the number this
+  bullet expected (2026-08-04).** `ontology_edges` accuracy turned out to have a
+  ceiling of 9 of 9 and a constant floor of 8 of 9, so it constrains nothing. The
+  number that does is the one it predicted the *shape* of: **2 of the rules arm's
+  18 calls matched no node**, which is linker precision expressed as zero-row
+  queries rather than as a percentage — and 4 of 9 for R7B, which is what the
+  linker is worth. Linker precision still has no upper reference; what it now has
+  is a cost, in queries that validate and return nothing.
 - **The 23-row eval set is the limit on all of the above.** Coverage is 40 gold
   chunks over 1,108 — **3.6%** — and only 6 of 40 are GDPR-side
   (`eval-set.md`). Two strata are 2 rows each, so a single question moves them 50

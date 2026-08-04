@@ -1,7 +1,10 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** Steps 0–4 done (2026-08-02, 2026-08-03). **Next action is Step 5** — the graph path:
-template selection, execution, path-to-prose. The router is deterministic and adopted (ADR-0012), so
+**Status:** Steps 0–5 done (2026-08-02, 2026-08-03, 2026-08-04). **Next action is Step 6** — context
+assembly, generation, citation validation. The graph path now runs end to end and its selector is
+deterministic and adopted (ADR-0013): **24 of 32 gold chunks, the oracle exactly, at $0.00**. It
+hands Step 6 a problem it did not have before — **2,886 statements over 9 questions, with nothing to
+rank them by.** The router is deterministic and adopted (ADR-0012), so
 `/ask` contributes $0.00 and ~3.5 ms before retrieval starts. The vector path is now measured end to
 end: **$0.002 per question**, essentially all of it rerank, against $0.0000032 for the embedding —
 so the per-query cost belongs to rerank and generate, not to embed.
@@ -454,7 +457,50 @@ Phase 5.
 
 ---
 
-## Step 5 — Graph path: template selection, execution, path-to-prose
+## ~~Step 5 — Graph path: template selection, execution, path-to-prose~~ ✅ DONE
+
+> **Outcome.** The graph path runs end to end. Deterministic selection reaches **24 of 32 gold
+> chunks — the oracle exactly** — at **$0.00** and **5.7 ms** p50, against Command R7B's **14 of 32**
+> at $0.000159 and 951 ms; ADR-0013 records the adoption and keeps the loser's numbers. `ag-001`
+> returns **11 of 11**, the aggregation row top-10 similarity cannot answer because it has 11 gold
+> chunks. Suite **258 → 326 tests** (68 new across `test_template_selector.py` and
+> `test_path_to_prose.py`); **326 pass / 0 skip** with containers up, **266 pass / 57 skip** with them
+> down. New `src/query/template_selector.py`, `src/query/graph_path.py`, artifact
+> `eval/selector-eval.jsonl`.
+>
+> **This step's own headline metric had a 90% floor, and measuring it first is the only reason that
+> is a caveat and not a published result.** `ontology_edges` selection accuracy has a ceiling of
+> **9 of 9** and a constant arm — `always-obligations_for_system`, which ignores the question — at
+> **8 of 9**. Two templates traverse `APPLIES_TO`/`IMPOSES`/`CLASSIFIED_AS` between them, which nearly
+> every row declares. Gold yield replaced it as the headline; edge-intersection is still published,
+> always beside its constants.
+>
+> **R7B lost on parameter values, not template choice, which is a different finding from ADR-0012's.**
+> It mostly picked correct templates and could not fill them: `system_type='high-risk AI system'` → **0
+> rows** where `'high risk ai system'` → 169, `article='gdpr'` → **0** where `'GDPR'` → 29. **4 of its
+> 9 calls matched no node, and every one passes `validate()`** — which checks parameter *names* while
+> the graph matches parameter *values*. *Rows are not correctness*, one layer down: **validation is not
+> correctness either.** R7B is also not reproducible at `temperature=0, seed=42` (16 then 14 over
+> identical sweeps), so its figure is asserted as a bound.
+>
+> **The rules reach the oracle, so selection is not the binding constraint** — the template library is.
+> The 8 unreached chunks sit behind `REFERENCES` and `LISTED_IN`, which **no typed template
+> traverses** (6 of the ontology's 13 relation types are typed-unreachable). Same shape as Step 4's
+> finding that ranking rather than retrieval bound the vector path.
+>
+> **Scope notes.** The hot fact is capped structurally: one statement per relationship *leg*, deduped,
+> so 169 rows render **one** classification statement citing 3 provisions and saying `+121 more`
+> (asserted against both synthetic and live rows). `path_to_prose` was widened to
+> `(rows, template, *, labels, max_provenance)` — the stub could only dispatch by sniffing keys —
+> recorded in ADR-0013. **The plan's claim that `RiskCategory` over-claims in `router.ANCHOR_TYPES`
+> was wrong**: `definition_of`'s `(t:Entity)` head accepts it, and the real disagreement is
+> one-directional — 6 types the router *excludes* that do fill a parameter. The router is left
+> unchanged so ADR-0012's 21 of 22 is not silently re-measured. The `derived` flag works live but is
+> **inert on this eval set** and is reported as inert. `path_between` fired **zero** times. **No
+> `_TBD_` was filled**: the plan said `failure-notes.md:39-40`, but the three `_TBD_`s are at lines
+> 66-68 and all belong to Step 6 and Phase 5 — a new measured-rate bullet was added instead.
+
+## Step 5 — Graph path: template selection, execution, path-to-prose (original)
 
 **Template selection.** From the linked entities (Step 2) and question shape. Under ADR-0002 the
 model may only pick a name and fill parameters — the selector's output must be validated against
@@ -585,7 +631,7 @@ Named so Phase 3 does not silently build on them.
 | ~~2~~ ✅ | ~~Linker precision/recall measured against `source_chunk_ids`→`entity_ids` over 21 rows; `GDPR` (uppercase) links correctly; no key contains an unbalanced paren; `docs/metrics/query-path.md` created~~ — all confirmed; precision **52%** (64% excl. instruments) with recall reported as a labelled lower bound after the denominator was measured at 18.9 nodes/row; **38/38** linked names live in Neo4j; 21 new tests, suite 138 → **159**, 0 skipped with containers up |
 | ~~3~~ ✅ | ~~Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled~~ — all confirmed; rules **21/22** adopted over R7B **10/22**, which also lost to the majority-class constant (**13/22**) and failed the pre-registered gate; R7B emitted `both` **0 of 23** times under two prompts; 38 new tests, suite 159 → **197**, 0 skipped with containers up |
 | ~~4~~ ✅ | ~~Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed~~ — all confirmed; measured against a **512** baseline produced first from the unmodified harness, not against the published 1536 table; **+4 chunks at k=5 / +3 at k=10** clear the pre-registered ±2 resolution while **no per-stratum delta does**; the k=5 ceiling (45/51) corrected the step's own reporting instruction; 61 new tests, suite 197 → **258**, 0 skipped with containers up |
-| 5 | Template selection measured against `ontology_edges`; prose uses `display_name`; every graph statement carries ≥1 `source_chunk_id`; derived edges identifiable in output |
+| ~~5~~ ✅ | ~~Template selection measured against `ontology_edges`; prose uses `display_name`; every graph statement carries ≥1 `source_chunk_id`; derived edges identifiable in output~~ — all confirmed, and the first clause was measured to be nearly uninformative (ceiling **9/9**, constant floor **8/9**) so gold yield became the headline: rules **24 of 32 = the oracle** vs R7B **14 of 32**, whose 4-of-9 zero-row calls all passed `validate()`; prose asserted free of lowercase keys; zero dangling chunk ids across both stores; derived edges identifiable live but **inert on the eval set** and reported as inert; 68 new tests, suite 258 → **326**, 0 skipped with containers up |
 | 6 | Every cited `chunk_id` provably ∈ retrieved set; regenerate-once path exercised by a test, not by hope; `_TBD_` at `failure-notes.md:40` filled |
 | 7 | `POST /ask` returns all five `AskResponse` fields on all three routes; `cost_usd` is non-zero and per-route; p50/p95 recorded |
 | 8 | Steps struck with outcome notes; both Phase-3 `_TBD_`s filled and both Phase-5 ones untouched; failure-notes entry written; `pytest` green |

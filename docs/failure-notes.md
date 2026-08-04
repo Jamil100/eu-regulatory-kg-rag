@@ -63,6 +63,15 @@ A change is marked `DONE` only if code in this repo enforces it.
 - Gold references reachable by reordering but not reached: **10 of 13**. The top-50 pool holds
   41 of 51 gold chunks; reranking returns 31 at k=10. The binding constraint on the vector path
   is **ranking, not candidate retrieval** — measured, not inferred.
+- Graph-path template selection (9 routed eval rows, 32 gold chunks, both arms executed live):
+  deterministic rules reach **24 of 32 gold chunks — the oracle exactly** — at **$0.00** and
+  **5.7 ms** p50, against Command R7B's **14 of 32** at $0.000159 and 951 ms. R7B's failure is
+  **parameter values, not template choice**: **4 of its 9 calls matched no node**, because it emits
+  display-form English (`high-risk AI system`, `gdpr`) where the graph is keyed on `normalize()`
+  output (`high risk ai system` → 169 rows, `GDPR` → 29). Every one of those calls **passes
+  `validate()`**, which checks parameter names and not values. R7B is also **not reproducible** at
+  `temperature=0, seed=42` — two sweeps gave 16 then 14 — so the figure is asserted as a bound. See
+  `docs/adr/adr-0013-template-selection-model-vs-rules.md`.
 - Citation-validation rejection rate: _TBD_
 - LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
@@ -78,12 +87,13 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
 | **Confirmed the part I looked at, assumed it covered the whole** | **6** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · **`_trim` verified against corpus names, reused on questions — no legal name ends in `?`** |
 | **A count mistaken for a shape** | **3** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere · **Command R7B at 45% accuracy — a weak-but-working classifier by the count, and by the distribution a three-way classifier that emitted `both` 0 of 23 times** |
-| **An interface neither side ever crossed** | **4** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · **`chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases** |
-| **Verified once by hand, never encoded** | **3** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) |
-| **A metric that looked like success** | **2** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans |
+| **An interface neither side ever crossed** | **5** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · `chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases · **`validate()` checks parameter *names*, the graph matches parameter *values*, and nothing checked that a validated call returns rows — 4 of R7B's 9 calls cleared ADR-0002's boundary and matched no node** |
+| **Verified once by hand, never encoded** | **4** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) · **the retry policy: Step 4 wrote down "the reranker had no retry, unlike every other API call site", and Step 5's new call site shipped without one too — a 429 scored the arm under measurement a zero** |
+| **A metric that looked like success** | **3** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans · **`ontology_edges` selection accuracy: ceiling 9 of 9, best constant 8 of 9 — any selector scores ~90%. Caught by computing the constants before writing an arm** |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
 | **A number that measured the instrument instead of the subject** | **2** | **Comparing post-rerank@5 against pre-rerank@10 — a 9.8pp handicap made entirely of the gold-count distribution (`ag-001` has 11 gold chunks), which the phase plan itself specified. Caught by computing `Σ min(gold_i, k)` before running anything** · **Rerank p95 of 83 s, which measured a trial key holding a request open, not Rerank 3.5. Caught by recording `attempts` and finding all of them 1** |
 | **A container non-empty because of its shape, not its content** | **1** | `collect(DISTINCT {chunk: rel.source_chunk_id})` on a missed `OPTIONAL MATCH` returns `[{chunk: null}]`, not `[]` — one fake citation that passes every `if provenance:` check. **Caught by a probe before it was written**, which is the only reason the count is 1 and not a defect |
+| **A determinism control that does not control** | **1** | **`temperature=0, seed=42` on Command R7B returned 16 then 14 gold hits over the same 23 questions, with plans differing on several rows. Cohere's `seed` is best-effort, so the model arm cannot have the byte-exact reproduction test the rules arm has — which is itself part of what ADR-0013 weighs** |
 
 **What the shape of this table says.** The top row is the most expensive class — three defects, all
 from the same 4,000-token artefact, none caught by a test, each found only by reading output. **The
@@ -1361,3 +1371,106 @@ The smaller lesson is sharper because it is self-inflicted: **the plan asserted 
 the number disproving it was already in the repo, in the file the plan cited two sections earlier.**
 Deriving a design from a document is not the same as checking it against the document, and the gap
 between those is where the last three of these entries have lived.
+
+---
+
+# Phase 3 Step 5: the metric had a 90% floor, and the model could not spell the keys
+
+Written 2026-08-04, building template selection, execution and path-to-prose.
+
+**What happened.** Two things, and the first nearly hid the second.
+
+The phase plan specified template-selection accuracy against each eval row's `ontology_edges`, and
+made it the step's headline deliverable. Computed before either selector arm existed: the ceiling is
+**9 of 9** on the scored rows, and the constant arm `always-obligations_for_system` scores **8 of 9**.
+`obligations_for_role` and `obligations_for_system` between them traverse `APPLIES_TO`, `IMPOSES` and
+`CLASSIFIED_AS`, which nearly every row declares — so a selector that emits one of them
+unconditionally, ignoring the question entirely, scores 89% on the metric that was supposed to
+evaluate it. Ceiling 9, floor 8: about one row of discriminating power.
+
+The second finding needed a metric that worked. With gold yield as the headline — does the executed
+plan's provenance contain the row's gold chunks — the rules reach **24 of 32**, which is the oracle
+exactly, and Command R7B reaches **14 of 32**. But R7B did not lose the way ADR-0012's R7B lost. The
+router's R7B failed at classification; this one mostly picked *correct templates* and could not fill
+them:
+
+```
+system_type='high-risk AI system'  ->   0 rows
+system_type='high risk ai system'  -> 169 rows
+article='gdpr'                     ->   0 rows
+article='GDPR'                     ->  29 rows
+```
+
+**4 of its 9 calls matched no node.** Every one of them passes `graph_query.validate()`.
+
+**Why it mattered.** `validate()` is ADR-0002 in code — the security boundary that has been this
+project's answer to "why not let the model write Cypher" for three phases. It checks the template
+name and the exact declared parameter set, and it is silent on parameter *values* by construction,
+because a value is data. So a model-selected call can clear the boundary, reach Neo4j, execute
+cleanly, and return nothing, and every layer reports success. `rows_returned: 0` was the only signal,
+and nothing was looking at it. This repo's oldest lesson is *rows are not correctness*; this is the
+same sentence one layer down — **validation is not correctness either.**
+
+Had the edge-intersection metric stayed the headline, R7B would have scored 5 of 9 on it against the
+rules' 9 of 9 and read as a merely-weaker classifier, and the reason — that it cannot reproduce
+`normalize()` from a question — would never have surfaced. That reason is the argument for the entity
+linker, measured.
+
+**What caught it.** Computing the constants and the oracle **before writing either arm**, which the
+plan required for exactly this reason and which Step 4 had established as the house move after the
+k=5-vs-k=10 ceiling. This is the recurrence tracker's "a metric that looked like success", third
+occurrence — and the first of the three caught before the number was published rather than after.
+
+The parameter-value defect was caught by recording `empty_calls` per row instead of only
+`rows_returned` per plan. A plan of three calls where one returns 169 rows and two return nothing has
+a healthy-looking total.
+
+**What I changed.**
+
+- `DONE` `TEMPLATE_EDGES` and `TEMPLATE_ANCHORS` are derived tables with drift tests that regex the
+  relationship types and pinned labels back out of the Cypher itself
+  (`test_template_edges_match_the_cypher`, `test_pinned_anchor_labels_match_the_cypher`). A template
+  that gains a leg without updating the table fails the test rather than silently describing a query
+  that no longer exists.
+- `DONE` `empty_calls` is recorded per row in `eval/selector-eval.jsonl` and asserted by
+  `test_r7b_produced_parameter_values_that_match_no_node`. A validated call that matches nothing is
+  now a counted event rather than an invisible one.
+- `DONE` `_chat_call` carries the same tenacity policy as `embedder._embed_call`, with `attempts`
+  recorded per call and retried calls excluded from the p50 — the reranker's fix from Step 4, applied
+  to the call site that shipped without it anyway.
+- `DONE` One statement per relationship leg, deduped, so the 169 rows of
+  `obligations_for_system('high risk ai system')` render **one** classification statement rather than
+  169 — asserted twice, once against 169 synthetic rows and once against the live 169
+  (`test_the_hot_fact_collapses_to_one_statement`, `test_the_live_hot_fact_renders_once`).
+- `DONE` A statement whose provenance chunk has no `citation_label` raises in `path_to_prose` rather
+  than becoming an uncitable document Step 6 would reject. `test_every_provenance_chunk_resolves_to_a
+  _citation_label` confirms zero dangling ids across Neo4j and pgvector over every call the selector
+  emits.
+- `DONE` Annex VIII/XI statements carry a caveat naming the deferred `section` defect. The item stays
+  `OPEN` below; 6 statements on the eval set carry it.
+- `OPEN` **The graph path emits 2,886 statements over 9 questions** — ~320 each — and nothing ranks
+  them. There is no score to rank by: `ContextDoc.score` is `None` on a graph document by design and
+  the two source scales are not comparable. This is Step 6's largest problem and it is created here.
+- `OPEN` **`router.ANCHOR_TYPES` excludes 6 types that do fill a declared parameter** (`Authority`,
+  `DefinedTerm`, `LawfulBasis`, `Penalty`, `Regulation`, `Right`), because its comment reasons only
+  about the three *typed* templates and `definition_of`'s head is `(t:Entity)`. Deliberately not
+  fixed: ADR-0012's adopted 21 of 22 was measured with the current set, and editing it re-measures
+  Step 3 silently. Pinned by `test_the_anchor_type_disagreement_is_exactly_as_recorded`.
+- `OPEN` **The `derived` flag is inert on this eval set.** It works against the live graph, but no
+  selected plan over the 23 questions traverses one of ADR-0010's 22 bridges. A test asserts the zero
+  so the day one is reached it must be written down.
+
+**What I learned.** The plan told me to pre-register a ceiling, and I did, expecting it to bind. It
+did not — it came back 9 of 9 — and the useful number was the one I had added almost as an
+afterthought beside it: the constants. **A ceiling tells you how much headroom a metric has; only a
+floor tells you whether the metric can distinguish anything.** I have been computing ceilings since
+Step 4 and this is the first time the floor was the load-bearing half.
+
+The second lesson is about a boundary I have been trusting in prose. ADR-0002 has said "the model
+only chooses a template and fills parameters" since Phase 0, and I have quoted that sentence in four
+documents as though both halves were equally established. Building the thing measured them
+separately for the first time: the choosing works, the filling does not, and the guard that makes the
+choosing safe was never designed to have an opinion about the filling. **A security boundary that
+holds is not evidence that the thing passing through it is correct** — and I had three phases of
+citing `validate()` without ever asking what a validated-but-wrong call would look like. It looks
+like success.
