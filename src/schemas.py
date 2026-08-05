@@ -250,6 +250,24 @@ class ContextDoc(BaseModel):
     a GRAPH document -- a rendered graph statement is provenance-bearing prose
     built from one or more chunks, not a free-floating fact, and `path_to_prose`
     is responsible for keeping that true.
+
+    `provenance` was added by Step 6 (ADR-0014) and is the widening that makes
+    the graph path's citations honest. A statement built from 124 asserting
+    chunks previously reached the answer path as `chunk_id=chunks[0]` -- the
+    lexicographically smallest of them -- with the rest surviving only as label
+    text inside `text` ("... (AIA Art. 26(1), +121 more)"). ADR-0013's headline
+    24-of-32 was computed against the full provenance union, which is a number
+    `Citation` could never carry: the field the key was derived from was dropped
+    at this boundary, which is the recurrence tracker's own row about itself.
+    `provenance` is **what was rendered**, so it is at most `max_provenance`
+    entries and its first element is always `chunk_id`. It is deliberately not
+    the full union: citing 124 chunks for one sentence is the 24,428-row
+    multiplication in a new costume (`path_to_prose.py:9-18`).
+
+    `[]` on a PASSAGE document, because a corpus chunk asserts itself and a
+    one-element list saying so would invite a caller to treat the two sources
+    symmetrically. `provenance == []` is how a consumer tells them apart without
+    reading `source`.
     """
 
     chunk_id: str
@@ -258,6 +276,7 @@ class ContextDoc(BaseModel):
     source: Literal["GRAPH", "PASSAGE"]
     score: float | None = None
     derived: bool = False  # ADR-0010: built from an inferred edge, not an asserted one
+    provenance: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -276,10 +295,39 @@ ROUTES: frozenset[str] = frozenset(get_args(Route))
 
 
 class Citation(BaseModel):
+    """One span of the generated answer, attributed to one corpus chunk.
+
+    `start`/`end` index **the answer string** and not any single content block.
+    Command A returns `content` as a list of blocks and reports offsets into
+    `content[content_index]`; `generate()` rebases them, because these two fields
+    are declared here as answer offsets and a caller checking
+    `answer[start:end] == text` is entitled to have that hold. It is the defect
+    `citation_validator.span_defects` exists to catch.
+
+    The three fields Step 6 added (ADR-0014) were all in hand at construction and
+    were previously thrown away:
+
+    * `citation_label` -- the string `eval/eval-questions.jsonl` grades on and the
+      only part of a citation a reader can check against the Official Journal.
+      Reconstructing it downstream would mean a second code path producing the
+      string Phase 5 grades, which is the failure `retriever.py:170` and
+      `graph_path.py:15-20` both refuse.
+    * `source` -- a GRAPH citation is a rendered statement's provenance and a
+      PASSAGE citation is the statute text the model read. Both are legitimate
+      and they are not the same kind of evidence.
+    * `document_id` -- which assembled document (`d0..dN`) the model actually
+      cited. One document fans out to up to `MAX_PROVENANCE` citations sharing
+      one span, so without this the fan-out is unattributable and a duplicate id
+      collapsing the reverse map is invisible.
+    """
+
     chunk_id: str
     start: int
     end: int
     text: str
+    citation_label: str = ""
+    source: Literal["GRAPH", "PASSAGE"] = "PASSAGE"
+    document_id: str = ""
 
 
 class AskRequest(BaseModel):

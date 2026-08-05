@@ -77,6 +77,14 @@ class GraphResult:
     """
 
     docs: list[ContextDoc] = field(default_factory=list)
+    # Parallel to `docs`: the index into `plan` of the call that first rendered
+    # each statement. Added by Step 6 for `context_assembly.budget_roundrobin`,
+    # which has to interleave across calls and cannot recover the grouping from a
+    # flat list. `obligations_for_role('provider')` alone renders 210 statements,
+    # so a first-N cap over the concatenation can consume the whole budget before
+    # the second call in the plan is reached -- that is the difference the
+    # round-robin arm exists to measure, and it is unmeasurable without this.
+    doc_calls: list[int] = field(default_factory=list)
     plan: list[TemplateCall] = field(default_factory=list)
     rows_returned: int = 0
     empty_calls: int = 0
@@ -191,7 +199,13 @@ def graph_search(
 
     started = time.perf_counter()
     docs: list[ContextDoc] = []
+    doc_calls: list[int] = []
     seen: set[str] = set()
+    # The call's position in `selection.plan`, not in `results`: `results` drops
+    # the calls that returned nothing, so indexing off it would renumber the plan
+    # whenever a call matched no node -- and 4 of R7B's 9 calls do exactly that
+    # (ADR-0013). `doc_calls` has to name the call a reader can look up.
+    plan_index = {id(call): i for i, call in enumerate(selection.plan)}
     for call, rows in results:
         try:
             rendered = path_to_prose(
@@ -206,10 +220,12 @@ def graph_search(
             if doc.text not in seen:
                 seen.add(doc.text)
                 docs.append(doc)
+                doc_calls.append(plan_index.get(id(call), 0))
     render_ms = (time.perf_counter() - started) * 1000
 
     return GraphResult(
         docs=docs,
+        doc_calls=doc_calls,
         plan=selection.plan,
         rows_returned=rows_returned,
         empty_calls=empty_calls,

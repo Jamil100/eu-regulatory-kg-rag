@@ -311,6 +311,14 @@ def path_to_prose(
                 source="GRAPH",
                 score=None,
                 derived=derived,
+                # `shown` and not `chunks`. The named provisions are the ones the
+                # statement's own text cites, so this is the list a citation may
+                # fan out over -- capped at what was shown, never at the full 124.
+                # Before ADR-0014 this list was computed here, rendered into the
+                # text as labels, and then dropped: `chunk_id` kept one of it and
+                # nothing else survived the boundary, so ADR-0013's 24-of-32 was
+                # measured against a set `Citation` could not carry.
+                provenance=shown,
             )
         )
     return docs

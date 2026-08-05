@@ -468,7 +468,11 @@ def _chat_call(client: Any, question: str) -> tuple[Any, int]:
         )
 
     response = _call()
-    return response, _call.retry.statistics.get("attempt_number", 1)
+    # `_call.statistics`, not `_call.retry.statistics` -- the latter is
+    # permanently `{}` in tenacity >= 8.2.3. See the same correction and its
+    # reasoning at src/query/reranker.py. Every `attempts` in
+    # `eval/selector-eval.jsonl` was written by the broken accessor.
+    return response, _call.statistics.get("attempt_number", 1)
 
 
 def select_by_model(question: str, client: Any | None = None) -> SelectorResult:

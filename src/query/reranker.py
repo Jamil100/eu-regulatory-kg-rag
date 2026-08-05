@@ -156,7 +156,16 @@ def _rerank_call(
         )
 
     response = _call()
-    return response, int(_call.retry.statistics.get("attempt_number", 1))
+    # `_call.statistics` and not `_call.retry.statistics`. The second is
+    # permanently `{}` -- since tenacity 8.2.3 the wrapper runs `copy =
+    # self.copy()` per call and assigns *the copy's* statistics to
+    # `wrapped_f.statistics`, leaving `wrapped_f.retry` as the original
+    # controller which never executes. Corrected in Step 6 against tenacity
+    # 9.1.4; every `attempts` value in `eval/rerank-eval.jsonl` was written by
+    # the broken accessor and is therefore 1 by construction, which is what
+    # `docs/metrics/query-path.md` now says beside the three stalls it used to
+    # attribute to the API tier on the strength of that field.
+    return response, int(_call.statistics.get("attempt_number", 1))
 
 
 def rerank_detailed(
