@@ -7,7 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "cohere>=5.0",
     "neo4j>=5.0",
-    "psycopg[binary]>=3.1",
+    # `pool` is the request path's, not the ingest path's: `/ask` runs in a
+    # FastAPI threadpool and `retriever.py:12-18` is written against a connection
+    # that "comes out of a pool and the next request inherits it".
+    "psycopg[binary,pool]>=3.1",
     "pgvector>=0.3",
     "fastapi>=0.110",
     "uvicorn>=0.29",
