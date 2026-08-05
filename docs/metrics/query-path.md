@@ -670,11 +670,23 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
 - **Every number here is provenance coverage, not answer accuracy.** A gold chunk
   appearing in a statement's citation list is not the same as the answer being
   right. Phase 5's judge is what closes that gap.
-- **The graph path's statements carry no statute text.** A `ContextDoc` from this
+- ~~**The graph path's statements carry no statute text.** A `ContextDoc` from this
   path holds the rendered statement and a citation label, by decision. On `both`
   the passage text arrives via the vector path; on `graph` — `ag-001` alone —
   Command A will see statements and no legislative prose. Whether that is enough
-  to generate from is a Step 6 question and is untested here.
+  to generate from is a Step 6 question and is untested here.~~ → **Answered by
+  Step 6, and the interesting half is the route this bullet did not ask about
+  (2026-08-05).** On `graph`, `ag-001` was served **50 statements and no
+  legislative prose** and returned a complete answer with 50 citations and 4 gold
+  chunks — so statements alone are enough to generate *something* citable.
+  **n=1**, and it is the only `graph`-routed row in the eval set, so this is an
+  existence result and not a rate. What Step 6 did find is that the premise of
+  the *other* clause was wrong: on `both`, the phase plan's "dedupe by
+  `chunk_id`" would have dropped the passage on **9 of the 10 routed rows**,
+  removing the only statute text from the prompt precisely where this bullet
+  assumed it would arrive safely. ADR-0014 records the reinterpretation. Whether
+  a statement-only prompt is *good enough* remains open — that is answer
+  accuracy, and it is Phase 5's judge, not this file's.
 - **`path_between` is measured at zero.** It is the only cover for the 6
   untraversable relation types and the rules arm never fired it: S6 only triggers
   when nothing else matched, and something else always matched. Its provenance is
