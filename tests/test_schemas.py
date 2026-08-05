@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.ingest.extract import ALLOWED_ENDPOINTS, endpoint_violations, orphan_entities
-from src.schemas import Chunk, ContextDoc, Entity, Extraction, Relationship
+from src.schemas import Chunk, Citation, ContextDoc, Entity, Extraction, Relationship
 
 
 def test_entity_valid_type():
@@ -197,4 +197,71 @@ def test_context_doc_is_not_chunk():
         Chunk(
             chunk_id="aia-art9-para1", regulation="AIA", text="...",
             article=9, paragraph=1, score=0.83,
+        )
+
+
+# --------------------------------------------------------------------------
+# The two ADR-0014 widenings
+# --------------------------------------------------------------------------
+
+
+def test_context_doc_provenance_defaults_to_empty_and_round_trips():
+    """`[]` on a passage is how a consumer tells the two sources apart without
+    reading `source`. A default_factory, so two documents cannot share a list."""
+    passage = ContextDoc(
+        chunk_id="aia-art9-para1", text="...", citation_label="AIA Art. 9(1)",
+        source="PASSAGE", score=0.83,
+    )
+    other = ContextDoc(
+        chunk_id="aia-art9-para2", text="...", citation_label="AIA Art. 9(2)",
+        source="PASSAGE", score=0.80,
+    )
+    assert passage.provenance == [] and other.provenance == []
+    assert passage.provenance is not other.provenance
+
+    graph = ContextDoc(
+        chunk_id="aia-art26-para1", text="...", citation_label="AIA Art. 26(1)",
+        source="GRAPH", provenance=["aia-art26-para1", "aia-art26-para10"],
+    )
+    assert ContextDoc.model_validate(graph.model_dump()) == graph
+
+
+def test_citation_round_trips_with_the_three_fields_step_6_added():
+    """All three were in hand at construction and were previously thrown away:
+    the label Phase 5 grades on, which kind of evidence it is, and which
+    assembled document the model actually cited."""
+    citation = Citation(
+        chunk_id="aia-art26-para10", start=12, end=27, text="the deployer",
+        citation_label="AIA Art. 26(10)", source="GRAPH", document_id="d3",
+    )
+    assert Citation.model_validate(citation.model_dump()) == citation
+
+
+def test_citation_defaults_keep_the_original_four_field_construction_valid():
+    """Step 7's `AskResponse` and any older caller build a Citation from four
+    fields. Making the new three required would have been a breaking change
+    dressed as a widening."""
+    citation = Citation(chunk_id="c1", start=0, end=3, text="The")
+    assert citation.citation_label == "" and citation.document_id == ""
+    assert citation.source == "PASSAGE"
+
+
+def test_citation_rejects_an_unknown_source():
+    with pytest.raises(ValidationError):
+        Citation(chunk_id="c1", start=0, end=3, text="The", source="WEB")
+
+
+def test_chunk_is_byte_unchanged_by_step_6():
+    """The widenings are on the query/answer models only. `Chunk` is
+    extra='forbid' because a previous version silently accepted 108 malformed
+    rows by dropping the fields that identified them, and neither `provenance`
+    nor a citation's document id is a field a corpus row can grow."""
+    assert set(Chunk.model_fields) == {
+        "chunk_id", "regulation", "text", "article", "article_title", "paragraph",
+        "definition", "annex", "annex_title", "section", "point", "token_count",
+    }
+    with pytest.raises(ValidationError):
+        Chunk(
+            chunk_id="aia-art9-para1", regulation="AIA", text="...",
+            article=9, paragraph=1, provenance=["aia-art9-para1"],
         )

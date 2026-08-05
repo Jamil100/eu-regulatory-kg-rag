@@ -349,10 +349,22 @@ def test_the_billed_search_units_are_recorded_for_every_call(artifact):
 
 
 def test_latency_excludes_nothing_silently(board, artifact):
-    """3 of 23 calls stalled for seconds inside a single request on a trial key.
+    """3 of 23 calls took seconds where the other 20 took ~300 ms on a trial key.
 
     They are reported by name rather than averaged into a p95 that would then be
     quoted as a Rerank 3.5 figure.
+
+    **The `rerank_retried == []` assertion below is a tautology on this artifact
+    and is kept as a regression guard rather than as evidence.** Step 6 found that
+    `_call.retry.statistics` is permanently `{}` in tenacity >= 8.2.3 -- the
+    `@retry` wrapper runs `copy = self.copy()` per call and assigns the copy's
+    statistics to `wrapped_f.statistics`, leaving `wrapped_f.retry` as a
+    controller that never executes. Every `attempts` in `rerank-eval.jsonl` was
+    written by that accessor and is therefore 1 by construction, so this cannot
+    currently fail. `reranker._rerank_call` now reads `_call.statistics`, so a
+    re-run of `--eval --refresh` would populate the field for real and this
+    assertion would start meaning what it says. `query-path.md` carries the
+    correction to the conclusion that was drawn from it.
     """
     assert board["rerank_calls"] == len(artifact)
     assert {qid for qid, _ in board["rerank_stalls"]} <= {row["id"] for row in artifact}

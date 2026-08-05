@@ -212,6 +212,72 @@ def test_a_graph_document_carries_no_similarity_score() -> None:
     assert docs[0].source == "GRAPH"
 
 
+def test_provenance_equals_the_chunks_the_statement_actually_named() -> None:
+    """ADR-0014's widening. Before it, this list was computed here, rendered into
+    the text as labels, and then dropped -- `chunk_id` kept one of it and nothing
+    else survived the boundary, so ADR-0013's 24-of-32 was measured against a set
+    `Citation` could never carry."""
+    rows = [{"t": node("x"), "a": node("y"), "defined_chunks": ["c1", "c2", "c3"]}]
+    labels = {"c1": "L1", "c2": "L2", "c3": "L3"}
+    docs = path_to_prose(rows, "definition_of", labels=labels)
+    assert docs[0].provenance == ["c1", "c2", "c3"]
+    for chunk in docs[0].provenance:
+        assert labels[chunk] in docs[0].text
+
+
+def test_provenance_never_exceeds_max_provenance() -> None:
+    """Capped at what was *shown*, never at the full 124. Citing 121 chunks a
+    reader was never shown is not evidence."""
+    chunks = [f"c{i:03d}" for i in range(CLASSIFIED_CHUNKS)]
+    rows = [{"t": node("x"), "a": node("y"), "defined_chunks": chunks}]
+    labels = {c: f"L{c}" for c in chunks}
+    docs = path_to_prose(rows, "definition_of", labels=labels, max_provenance=3)
+    assert docs[0].provenance == chunks[:3]
+    assert f"+{CLASSIFIED_CHUNKS - 3} more" in docs[0].text
+
+
+def test_the_first_provenance_entry_is_the_documents_own_chunk_id() -> None:
+    """`chunk_id` is `provenance[0]`, so a consumer that ignores the fan-out and
+    reads `chunk_id` alone gets a chunk that is genuinely in the list."""
+    chunks = [f"c{i}" for i in range(5)]
+    rows = [{"t": node("x"), "a": node("y"), "defined_chunks": chunks}]
+    docs = path_to_prose(rows, "definition_of", labels={c: f"L{c}" for c in chunks})
+    assert docs[0].provenance[0] == docs[0].chunk_id
+
+
+def test_a_single_chunk_statement_has_a_one_element_provenance() -> None:
+    rows = [{"t": node("x"), "a": node("y"), "defined_chunks": ["only"]}]
+    docs = path_to_prose(rows, "definition_of", labels={"only": "L"})
+    assert docs[0].provenance == ["only"]
+
+
+def test_a_merged_statement_carries_the_merged_provenance() -> None:
+    """Two rows rendering the same statement union their chunks, and the shown
+    list has to come from the union rather than from whichever row was first."""
+    rows = [
+        {"t": node("x"), "a": node("y"), "defined_chunks": ["c2"]},
+        {"t": node("x"), "a": node("y"), "defined_chunks": ["c1"]},
+    ]
+    docs = path_to_prose(rows, "definition_of", labels={"c1": "L1", "c2": "L2"})
+    assert len(docs) == 1
+    assert docs[0].provenance == ["c2", "c1"]
+
+
+def test_a_passage_sourced_document_carries_no_provenance() -> None:
+    """`provenance == []` is how a consumer tells the two sources apart without
+    reading `source`. A corpus chunk asserts itself; a one-element list saying so
+    would invite a caller to treat the two symmetrically."""
+    from src.query.retriever import ContextDoc as _  # noqa: F401 -- same model
+
+    from src.schemas import ContextDoc
+
+    doc = ContextDoc(
+        chunk_id="aia-art9-para1", text="statute", citation_label="AIA Art. 9(1)",
+        source="PASSAGE", score=0.9,
+    )
+    assert doc.provenance == []
+
+
 def test_an_unknown_template_has_no_renderer() -> None:
     with pytest.raises(ProseError, match="has no renderer"):
         path_to_prose([], "obligations_for_everything", labels={})

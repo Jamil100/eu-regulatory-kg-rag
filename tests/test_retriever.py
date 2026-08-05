@@ -229,14 +229,24 @@ def test_an_api_error_becomes_a_retriever_error_not_a_system_exit():
 # The context document contract
 # --------------------------------------------------------------------------
 
-def test_context_doc_still_has_exactly_the_six_adr_0011_fields():
-    """ContextDoc is not extra="forbid", so a seventh field can be bolted on.
+def test_context_doc_has_exactly_the_fields_two_adrs_put_there():
+    """ContextDoc is not extra="forbid", so an eighth field can be bolted on.
 
     A separate `rerank_score` would give the object two score fields with no ADR
-    and no rule about which one a consumer should trust.
+    and no rule about which one a consumer should trust. That is what this test
+    was written to stop and it still is.
+
+    `provenance` is the one widening that has cleared it. It was added by Step 6
+    and recorded in ADR-0014 as a signature correction, the treatment ADR-0011
+    and ADR-0013 used for the same kind of change, and it exists because
+    `path_to_prose` was computing the list, rendering it into the statement text
+    as labels, and then dropping it -- so ADR-0013's 24-of-32 was measured
+    against a set `Citation` could never carry. Failing here is the correct
+    behaviour for a field added without an ADR; this one has one.
     """
     assert set(ContextDoc.model_fields) == {
         "chunk_id", "text", "citation_label", "source", "score", "derived",
+        "provenance",
     }
 
 
