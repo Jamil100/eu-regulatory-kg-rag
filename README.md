@@ -53,10 +53,49 @@ python -m src.index.embedder --apply    # -> pgvector
 
 # 4. Serve
 uvicorn src.api.app:app --reload
+# The Neo4j driver, the Postgres pool, the Cohere client and the entity index
+# are built once at startup, not per request. Startup does not fail on a store
+# that is down -- GET /health reports which one, and /ask answers 503 naming it.
+curl localhost:8000/health
+# {"status":"ok","neo4j":"ok","postgres":"ok","cohere":"ok","index":"ok"}
 
 # 5. Ask
 curl -X POST localhost:8000/ask -H 'content-type: application/json' \
   -d '{"question": "How does the AI Act define a deployer?"}'
+```
+
+```jsonc
+{
+  "answer": "The AI Act defines a deployer as a natural or legal person, public authority, agency or other body using an AI system under its authority except where the AI system is used in the course of a personal non-professional activity.",
+  "citations": [
+    {
+      "chunk_id": "aia-art3-def4",
+      "start": 35,
+      "end": 227,
+      "text": "natural or legal person, public authority, agency or other body using an AI system under its authority except where the AI system is used in the course of a personal non-professional activity.",
+      "citation_label": "AIA Art. 3(4)",
+      "source": "PASSAGE",       // or GRAPH, for a rendered graph statement
+      "document_id": "d0"
+    }
+  ],
+  "route": "vector",              // graph | vector | both, chosen deterministically
+  "latency_ms": 1907.87,          // the whole handler, not the model call
+  "cost_usd": 0.0052137           // null if the route used an unpriced component
+}
+```
+
+`start`/`end` index the answer string, so `answer[start:end] == text` holds and
+is checked server-side. Every cited `chunk_id` is validated against the set of
+documents the model was given before the response is returned; on a failure the
+answer is regenerated once with the defect named, then stands or fails loudly.
+
+Per-route cost and latency over the 23-question eval set are in
+[docs/metrics/answer-path.md](docs/metrics/answer-path.md) — median **$0.0067**
+and **3.4 s** pooled p50, `both` costing roughly twice `vector`. Reproduce with:
+
+```bash
+python -m src.api.ask_eval --eval             # the table, from the committed artifact
+python -m src.api.ask_eval --eval --refresh   # re-run all 23 live (~$0.18)
 ```
 
 ## License / attribution
