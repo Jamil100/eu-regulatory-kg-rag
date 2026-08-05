@@ -11,7 +11,11 @@ graph path now runs end to end: deterministic template selection reaches **24 of
 32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
 and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
 rows at all.**
-Phase 3 Steps 2–5 complete. Steps 6–7 append here.
+Phase 3 Steps 2–5 complete. **Step 6 is measured in
+`docs/metrics/answer-path.md`** — split out because this file is already 650+
+lines and because generation, citation validation and the statement budget are a
+different subject from retrieval. Step 7's per-route latency and cost table
+appends there too.
 
 Fifth companion to `extraction-cost-and-findings.md` (what came out of the
 model), `graph-load.md` (what came out of the loader), `eval-set.md` (the
@@ -422,13 +426,28 @@ measured the same thing.
 | rerank | **286 ms** | 50 documents, one search unit |
 
 **The p95 is not reported, because it would be a fact about the API key.** Three
-of 23 rerank calls stalled inside a *single* HTTP request — `hn-001` 83.5 s,
-`sh-006` 82.4 s, `th-003` 3.9 s — all with `attempts=1`, so this was not retry
-backoff. The measurement ran on a Cohere trial key (10 calls/minute), and the
-tier appears to hold a request open rather than return 429. The other 20 calls
-returned in 230–340 ms. `scoreboard()` lists the stalls by name and the report
-prints "quote the p50, not the p95"; a percentile over 23 calls with that tail
-describes the account, not Rerank 3.5.
+of 23 rerank calls took far longer than the rest — `hn-001` 83.5 s, `sh-006`
+82.4 s, `th-003` 3.9 s. The measurement ran on a Cohere trial key (10
+calls/minute). The other 20 calls returned in 230–340 ms. `scoreboard()` lists
+the stalls by name and the report prints "quote the p50, not the p95"; a
+percentile over 23 calls with that tail describes the account, not Rerank 3.5.
+
+> **Correction (Step 6, 2026-08-05).** This paragraph previously read *"all with
+> `attempts=1`, so this was not retry backoff"* and concluded that the trial tier
+> holds a request open rather than returning 429. **The evidence for that does
+> not exist.** `attempts` was read via `_call.retry.statistics`, which is
+> permanently `{}` in tenacity ≥ 8.2.3 — the `@retry` wrapper runs `copy =
+> self.copy()` per invocation and assigns *the copy's* statistics to
+> `wrapped_f.statistics`, while `wrapped_f.retry` stays a controller that never
+> executes. So `.get("attempt_number", 1)` returned the default on every call at
+> every site, and `attempts=1` was a tautology rather than an observation. Two
+> 82-second stalls are also squarely inside what `wait_exponential_jitter(
+> initial=2, max=60)` over 6 attempts can produce, so retry backoff is a live
+> explanation and not an excluded one. The accessor is fixed at all three call
+> sites; **`eval/rerank-eval.jsonl` and `eval/selector-eval.jsonl` were written
+> by the broken one, so their `attempts` columns are 1 by construction** and
+> re-running either sweep is what would settle this. The stall/retry distinction
+> stays open; only the p50 is quotable either way.
 
 ### Cost, and the one rate in this repo with no first-party source
 
@@ -472,7 +491,7 @@ plan on rerank confidence as a refusal input.
 |---|---|---|
 | The reranker had no retry, unlike every other API call site in the repo | the first sweep died mid-run on a 429 from a 10-calls/minute trial key | `_rerank_call` wrapped in the same tenacity policy as `embedder._embed_call`; a transient limit no longer fails a request |
 | The sweep embedded each question separately | 46 API calls where 24 would do, and the k-matrix arms could have seen different vectors | one batched `embed_texts` call, vectors handed to `retrieve_detailed(vector=...)` |
-| Rerank p95 read 83 s and looked like a model figure | retry-vs-stall was indistinguishable in the artifact | `attempts` recorded per call; stalls listed by name, never averaged into a percentile |
+| Rerank p95 read 83 s and looked like a model figure | retry-vs-stall was indistinguishable in the artifact | `attempts` recorded per call; stalls listed by name, never averaged into a percentile. **The `attempts` half of this fix did not work — see the correction above; the stalls-by-name half did** |
 
 ## Graph path: template selection, execution, and prose
 
@@ -624,14 +643,17 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
 
 ## Open
 
-- **The graph path emits 2,886 statements over 9 questions — ~320 per question —
-  and Step 6 cannot put that in a prompt.** Gold coverage is there; precision is
-  not. `obligations_for_role('provider')` alone is 210 rows. Nothing in this step
-  ranks statements, because there is no score to rank them by: `ContextDoc.score`
-  is `None` on a graph document by design, and the two source scales are not
-  comparable (`retriever.py:26-30`). Step 6 has to decide between reranking the
-  statements as documents, capping per template, or scoring by anchor distance —
-  and it is the largest open item on this path.
+- ~~**The graph path emits 2,886 statements over 9 questions — ~320 per question —
+  and Step 6 cannot put that in a prompt.**~~ **CLOSED by ADR-0014** (Step 6). All
+  three options named here were built and measured — rerank the statements,
+  interleave per template call, score by anchor — against the constant `docs[:50]`
+  and an uncapped ceiling. **The constant won, and every ranked arm was actively
+  worse**: reranking and anchor-scoring both concentrate near-duplicate statements,
+  and Command A responds to a monotone document set by writing `<co>` citation
+  markup into the answer until `max_tokens`. The cap costs 15 of 25 reachable gold
+  chunks and the best-to-worst spread between capped arms is 6, so the budget is
+  the lever and the ranking inside it is nearly noise. See
+  `docs/metrics/answer-path.md`.
 - **The oracle is the constraint, not the selector.** The rules arm already
   reaches the best single call per row. The 8 unreached gold chunks sit behind
   `REFERENCES` and `LISTED_IN`, which no typed template traverses. A seventh
