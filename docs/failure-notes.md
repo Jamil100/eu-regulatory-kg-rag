@@ -72,7 +72,36 @@ A change is marked `DONE` only if code in this repo enforces it.
   `validate()`**, which checks parameter names and not values. R7B is also **not reproducible** at
   `temperature=0, seed=42` — two sweeps gave 16 then 14 — so the figure is asserted as a bound. See
   `docs/adr/adr-0013-template-selection-model-vs-rules.md`.
-- Citation-validation rejection rate: _TBD_
+- Citation-validation rejection rate: **0%** (0 of 23 rows, adopted `first` budget at N=50,
+  no `MAX_TOKENS` exclusions). **Read this as a plumbing check that passed, not as a result.**
+  `generate()` only emits a `Citation` for a document id it found in the reverse map of the
+  documents it just sent, and `validate()` is handed those same documents' chunk ids, so
+  membership holds by construction — publishing 0% as a finding would be the "metric that looked
+  like success" row below for a fourth time. The two checks added beside it *can* fail and also
+  came back clean: **span defects 0 of 23** (`answer[start:end] != citation.text`) and
+  **uncited labels in prose 0 of 23** — no answer named an `AIA Art. …` / `GDPR Art. …` the
+  prompt had not shown it, including out of a statement's `+121 more` tail. `dropped` — malformed,
+  tool-sourced or invented citations, which is what would move before `validate()` could — is
+  **0 across all 5 arms and 115 rows**. See `docs/metrics/answer-path.md`.
+- Graph-statement budget cost, and what the budget is not: the cap keeps **8 of 35** gold chunks
+  at N=50 against an uncapped ceiling of **25 of 35**, while the spread between the best and worst
+  capped arm is 6 — so the cap is the lever and the ranking inside it is nearly noise. `anchor`
+  is +2 over the constant, exactly ADR-0004's declared resolution, and `roundrobin` is **−4**,
+  which clears it in the wrong direction. **The constant is adopted, and not on retention**: it is
+  the only one of five arms that produced a scored answer on all 23 rows. See
+  `docs/adr/adr-0014-graph-statement-budget.md`.
+- Prompt-collapse rate on the graph path: **3 of 5 budget arms** truncated on at least one row
+  because Command A leaked its own `<co>…</co>` citation markup into the answer *text* and ran to
+  `max_tokens`. **Not a document count**: `ag-001` was sent exactly 50 documents by both `rerank`
+  and `first` from the same 389 statements — `rerank` collapsed, `first` returned `COMPLETE` with
+  50 citations. What tracks it is document monotony (`anchor` sends 48 of 50 documents sharing one
+  sentence frame), so **every arm that ranks graph statements triggers it and the unranked constant
+  does not**.
+- Refusal behaviour, n=4, reported per row and never averaged: **4 of 4 correct** under the adopted
+  arm — `oos-001`/`oos-002` declined with zero citations, `hn-001`/`hn-002` answered and cited a
+  retrieved gold chunk. But `oos-001` is really **4 of 5**: the five arms sent it byte-identical
+  documents and produced five different answers at `temperature=0, seed=42`, one of which cited 11
+  documents for a question the corpus cannot answer.
 - LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
 
@@ -85,15 +114,16 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | Root cause | Times | Where |
 |---|---|---|
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
-| **Confirmed the part I looked at, assumed it covered the whole** | **6** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · **`_trim` verified against corpus names, reused on questions — no legal name ends in `?`** |
+| **Confirmed the part I looked at, assumed it covered the whole** | **7** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · `_trim` verified against corpus names, reused on questions — no legal name ends in `?` · **`citation_options={"mode":"ACCURATE"}` read off the SDK enum, which is the union over every Cohere model; `command-a-03-2025` returns a 400 for it. The enum was confirmed; that it applied to this model was assumed** |
 | **A count mistaken for a shape** | **3** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere · **Command R7B at 45% accuracy — a weak-but-working classifier by the count, and by the distribution a three-way classifier that emitted `both` 0 of 23 times** |
-| **An interface neither side ever crossed** | **5** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · `chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases · **`validate()` checks parameter *names*, the graph matches parameter *values*, and nothing checked that a validated call returns rows — 4 of R7B's 9 calls cleared ADR-0002's boundary and matched no node** |
+| **An interface neither side ever crossed** | **6** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · `chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases · `validate()` checks parameter *names*, the graph matches parameter *values*, and nothing checked that a validated call returns rows — 4 of R7B's 9 calls cleared ADR-0002's boundary and matched no node · **`LABEL_RE` vs the 41 gold citation labels it grades against: the specified `[^\s,;)]+` excludes `)` and stops *inside* the parenthesis, matching `AIA Art. 9(1` for 40 of the 41. Wrong by one character, and the regex had never been run against the strings it exists to match** |
 | **Verified once by hand, never encoded** | **5** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) · the retry policy: Step 4 wrote down "the reranker had no retry, unlike every other API call site", and Step 5's new call site shipped without one too — a 429 scored the arm under measurement a zero · **Step 5's own pre-registration: the ceiling and oracle were computed by scripts in a temp directory outside the repo and transcribed as literals, in the same commit whose write-up bumped this row to 4** |
-| **A metric that looked like success** | **3** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans · **`ontology_edges` selection accuracy: ceiling 9 of 9, best constant 8 of 9 — any selector scores ~90%. Caught by computing the constants before writing an arm** |
+| **A metric that looked like success** | **4** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans · `ontology_edges` selection accuracy: ceiling 9 of 9, best constant 8 of 9 — any selector scores ~90%. Caught by computing the constants before writing an arm · **`attempts` has been 1 at every API call site since it was introduced: `_call.retry.statistics` is permanently `{}` in tenacity ≥ 8.2.3, because the wrapper runs `copy = self.copy()` and assigns the copy's statistics to `wrapped_f.statistics` while `wrapped_f.retry` stays a controller that never executes. So `rerank_retried == []` was a tautology and "3 stalls, all with `attempts=1`, so this was not retry backoff" was a conclusion drawn from a field that could not report anything else** |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
 | **A number that measured the instrument instead of the subject** | **2** | **Comparing post-rerank@5 against pre-rerank@10 — a 9.8pp handicap made entirely of the gold-count distribution (`ag-001` has 11 gold chunks), which the phase plan itself specified. Caught by computing `Σ min(gold_i, k)` before running anything** · **Rerank p95 of 83 s, which measured a trial key holding a request open, not Rerank 3.5. Caught by recording `attempts` and finding all of them 1** |
 | **A container non-empty because of its shape, not its content** | **1** | `collect(DISTINCT {chunk: rel.source_chunk_id})` on a missed `OPTIONAL MATCH` returns `[{chunk: null}]`, not `[]` — one fake citation that passes every `if provenance:` check. **Caught by a probe before it was written**, which is the only reason the count is 1 and not a defect |
-| **A determinism control that does not control** | **1** | **`temperature=0, seed=42` on Command R7B returned 16 then 14 gold hits over the same 23 questions, with plans differing on several rows. Cohere's `seed` is best-effort, so the model arm cannot have the byte-exact reproduction test the rules arm has — which is itself part of what ADR-0013 weighs** |
+| **A determinism control that does not control** | **2** | `temperature=0, seed=42` on Command R7B returned 16 then 14 gold hits over the same 23 questions, with plans differing on several rows. Cohere's `seed` is best-effort, so the model arm cannot have the byte-exact reproduction test the rules arm has — which is itself part of what ADR-0013 weighs · **The same settings on Command A: `oos-001` routes `vector`, so all five budget arms sent it byte-identical documents, and it came back with five different answers — four declining with zero citations and one citing 11 documents for a question the corpus cannot answer. The step's 4-of-4 refusal result is really 4-of-5 on that row** |
+| **A premise about the code that was true, and an inference from it that was false** | **1** | **Step 6 was designed around "the graph path's headline was scored on a set that cannot reach a citation": `path_to_prose` sets `chunk_id = chunks[0]` and the rest survive only as label text. The description is exactly right. The inference — that `oracle_primary` must sit well below the 24 of 32 `oracle_provenance` — is wrong, and only measuring said so: with 389–642 statements per row, every gold chunk in the union is also the lexicographic minimum of *some* statement's provenance, so all three oracles are 24. The widening the step was built to justify was still worth making; the defect it was built to repair did not exist** |
 
 **What the shape of this table says.** The top row is the most expensive class — three defects, all
 from the same 4,000-token artefact, none caught by a test, each found only by reading output. **The
@@ -105,12 +135,31 @@ from *this* document's own remedy: `definition_of` passed a non-empty test becau
 chosen from the part that worked — the identical mistake as the five hand-checked articles in the
 ingestion section, three phases later.
 
-**The newest row is the first one whose instances were caught before they were published, and both
-were caught the same way: by asking what the denominator belonged to.** Neither was a coding error —
-both numbers would have been computed correctly from correct data and would have been wrong about the
-world. One came from the phase plan's own written instruction, which is the more useful half of the
-lesson: a measurement protocol is as capable of encoding a defect as a few-shot example is, and this
-document already has a three-instance row proving the latter.
+**"A number that measured the instrument instead of the subject" was the first row whose instances
+were caught before they were published, and both were caught the same way: by asking what the
+denominator belonged to.** Neither was a coding error — both numbers would have been computed
+correctly from correct data and would have been wrong about the world. One came from the phase plan's
+own written instruction, which is the more useful half of the lesson: a measurement protocol is as
+capable of encoding a defect as a few-shot example is, and this document already has a three-instance
+row proving the latter.
+
+**Step 6 added a row that inverts the document's usual lesson, and it is the one worth reading
+twice.** Everywhere else here, a careful reading of the code would have caught the defect. In *"a
+premise about the code that was true, and an inference from it was false"*, the careful reading is
+the defect. The step was designed, argued and budgeted around a claim about `path_to_prose` that is
+literally correct — it does keep one chunk and drop the rest — and the conclusion drawn from it was
+false, because the conclusion depended on a property of the *data* (how many statements a row
+renders) that no amount of reading the function could supply. It cost nothing, because the
+pre-registration ran before any arm was written and said so on the first attempt. Had the arms been
+built first and the oracles computed afterwards, the equality would have arrived as a confusing
+result instead of a finding.
+
+The same step supplied the sharpest instance of the opposite failure. `attempts` was added in Step 4
+*because* this document said to encode the retry policy rather than verify it by hand, was read at
+three call sites, was excluded from two published percentiles, and carried a conclusion in
+`query-path.md` — and it was structurally incapable of ever returning anything but 1. **The remedy
+for "verified once by hand, never encoded" is an instrument, and an instrument is a thing that can
+itself be wrong in exactly the way it was built to prevent.**
 
 ---
 

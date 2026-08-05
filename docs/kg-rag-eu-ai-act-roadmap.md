@@ -244,7 +244,7 @@ kg-rag-eu-ai-act/
 │   ├── ingest/             # parser, chunker, extractor, entity_resolution, graph_writer
 │   ├── index/              # embedder, pgvector schema, recall harness
 │   ├── query/              # router, entity_linker, cypher_templates, retriever, reranker
-│   ├── answer/             # path_to_prose, context_assembly, generate, citation_validator
+│   ├── answer/             # path_to_prose, context_assembly, generate, citation_validator, answer_path
 │   └── api/                # FastAPI app
 ├── eval/
 │   ├── eval-questions.jsonl # stratified eval set + gold answers + gold chunk ids
