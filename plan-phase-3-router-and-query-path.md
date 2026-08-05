@@ -1,13 +1,26 @@
 # Phase 3 + 4: from a populated store to a working `/ask`
 
-**Status:** Steps 0–5 done (2026-08-02, 2026-08-03, 2026-08-04). **Next action is Step 6** — context
-assembly, generation, citation validation. The graph path now runs end to end and its selector is
-deterministic and adopted (ADR-0013): **24 of 32 gold chunks, the oracle exactly, at $0.00**. It
-hands Step 6 a problem it did not have before — **2,886 statements over 9 questions, with nothing to
-rank them by.** The router is deterministic and adopted (ADR-0012), so
-`/ask` contributes $0.00 and ~3.5 ms before retrieval starts. The vector path is now measured end to
-end: **$0.002 per question**, essentially all of it rerank, against $0.0000032 for the embedding —
-so the per-query cost belongs to rerank and generate, not to embed.
+**Status:** **CLOSED 2026-08-05.** Steps 0–8 done (2026-08-02 → 2026-08-05). The roadmap's exit
+criterion — **"End-to-end `/ask` works on all routes"** — is met and measured live: **23 of 23 eval
+questions served through `POST /ask` against real Neo4j and pgvector, 0 failures, 0 unpriced rows**,
+at **$0.1793 total / $0.0067 median** and a pooled **p50 of 3,419 ms**, on all three routes
+(14 `vector`, 8 `both`, 1 `graph`). Suite **92 → 462 tests**.
+
+Three of the four model-vs-deterministic contests in this phase were won by the deterministic arm and
+recorded as such: the router (ADR-0012, **21 of 22** at $0.00 against R7B's 10), template selection
+(ADR-0013, **24 of 32 gold chunks — the oracle exactly** — against R7B's 14), and the graph-statement
+budget (ADR-0014, where the unranked constant beat every ranked arm and **not on retention**). The
+fourth, generation, was never a contest: Command A is the only arm.
+
+**What the phase did not settle** is written down rather than absorbed. Rerank's aggregate uplift
+clears this eval set's resolution and **no per-stratum move does**, including the two-hop 30% it was
+named as the lever for. The 8 gold chunks the graph path cannot reach sit behind `REFERENCES` and
+`LISTED_IN`, which no template traverses — a library limit, not a selector one. And every number here
+is provenance coverage, not answer accuracy; Phase 5's judge is what closes that gap.
+
+Steps 0–5 are measured in `docs/metrics/query-path.md`; **Steps 6–7 in
+`docs/metrics/answer-path.md`**, split out because the first file was already 650+ lines and because
+generation and citation validation are a different subject from retrieval.
 
 **Scope.** Roadmap Phase 3 (router + graph query path) *and* Phase 4 (path-to-prose, grounded
 generation, citation validation), which the roadmap puts in the same week under one exit criterion:
@@ -539,7 +552,70 @@ reads a confident Annex VIII citation as verified.
 
 ---
 
-## Step 6 — Context assembly, generation, citation validation
+## ~~Step 6 — Context assembly, generation, citation validation~~ ✅ DONE
+
+> **Outcome.** `assemble → generate → validate` runs end to end on all three routes. The
+> graph-statement budget was measured over five arms and **the unranked constant won** — ADR-0014,
+> `first` at N=50 — **and not on retention**: it is the only one of five arms that produced a scored
+> answer on all 23 rows. The three checks all came back clean on one denominator: citation-validation
+> rejection **0 of 23**, span defects **0 of 23**, uncited labels in prose **0 of 23**. Suite **329 →
+> 483 tests** (143 in four new files — `test_answer_path.py`, `test_context_assembly.py`,
+> `test_generate.py`, `test_citation_validator.py` — plus 11 into existing ones). New
+> `docs/metrics/answer-path.md`, artifact `eval/answer-eval.jsonl`, ~**$1.24** against a ~$1.30
+> estimate.
+>
+> **The premise this step was designed around was measured false before an arm was written.** The
+> step existed partly to widen a `ContextDoc` boundary believed to be costing citations:
+> `path_to_prose` sets `chunk_id = chunks[0]` and keeps the rest only as label text, so
+> `oracle_primary` "must" sit well below `oracle_provenance`. The description is exactly right and
+> the inference is wrong. **All three oracles came out 24 of 32** — reproducing ADR-0013 to the chunk
+> through a different code path — because with 389–642 statements per row every gold chunk in the
+> union is also the lexicographic minimum of *some* statement's provenance. The widening was still
+> worth making; the defect it was built to repair did not exist. It cost nothing only because
+> `preregister()` ran before any arm was built.
+>
+> **What breaks generation is neither the budget nor the boundary — it is `<co>` markup.** Three of
+> five arms truncated because Command A leaks its own citation training format into the answer
+> *text* and then runs to `max_tokens`. **It is not document count**, and `ag-001` isolates that:
+> `rerank` and `first` both sent it exactly **50** documents from the same 389 statements; `rerank`
+> collapsed, `first` returned `COMPLETE` with 50 citations and the same 4 gold chunks. What tracks it
+> is **document monotony** — `anchor` sends 48 of 50 documents sharing one sentence frame — so **every
+> arm that ranks graph statements triggers it and the unranked constant does not.** The cap costs 15
+> of 25 reachable gold chunks while the best-to-worst spread *among* capped arms is 6: the budget is
+> the lever and the ranking inside it is nearly noise.
+>
+> **The plan's "dedupe by `chunk_id` across both paths" was reinterpreted, not implemented, and
+> ADR-0014 records why.** **9 of the 10 routed rows** have at least one chunk id present as both a
+> GRAPH and a PASSAGE document, so the instruction would have deleted one of each pair on nearly
+> every graph-routed question. They are not duplicates — one is a rendered relationship, the other is
+> the statute text — and dropping the passage removes the only legislative prose from the prompt.
+>
+> **The label key the plan said was "defined nowhere" is still not a bracketed constant, by
+> decision.** `[GRAPH]`/`[PASSAGE]` is prose notation from the roadmap; the data keys are
+> `TEXT_KEY, SOURCE_KEY, LABEL_KEY = "text", "source", "citation"`
+> (`src/answer/context_assembly.py:108`) with the unbracketed `ContextDoc.source` literal as the
+> value. Inventing a bracketed constant would have added a second spelling of a thing `schemas.py`
+> already pins.
+>
+> **The `_TBD_` was filled, and labelled near-tautological in the same breath.** The
+> *Citation-validation rejection rate* bullet in `failure-notes.md` publishes the 0% as *a plumbing
+> check that passed, not a result*: `generate()` only emits a `Citation` for an id it found in the reverse map of the
+> documents it just sent, so membership holds by construction. The two checks added beside it *can*
+> fail — `span_defects` and `uncited_labels` — and `GenerationResult.dropped`, the number that would
+> move before `validate()` ever could, is **0 across all 5 arms and 115 rows**. **Regeneration never
+> fired**, so the repair path is exercised by a fake client rather than measured.
+>
+> **Scope notes.** Five defects on the way in, three of which were instruments rather than product:
+> `_call.retry.statistics` is permanently `{}` in tenacity ≥ 8.2.3, so `attempts` had been 1 by
+> construction at **all three** call sites since Step 4 — which retroactively voids that step's "not
+> retry backoff" conclusion; `citation_options={"mode":"ACCURATE"}` is a 400 from
+> `command-a-03-2025` because the SDK enum is the union over every Cohere model; and the plan's own
+> `LABEL_RE` excluded `)`, matching `AIA Art. 9(1` for **40 of the 41** gold labels it exists to
+> grade against. Refusal is **4 of 4** under the adopted arm and is reported as **n=4** — and
+> `oos-001` is really **4 of 5**, having produced five different answers from byte-identical
+> documents at `temperature=0, seed=42`.
+
+## Step 6 — Context assembly, generation, citation validation (original)
 
 - **`assemble()`** — dedupe by `chunk_id` across both paths, label `[GRAPH]` / `[PASSAGE]`. The label
   strings are specified in prose across three files and **the key that holds them is defined
@@ -562,7 +638,62 @@ reads a confident Annex VIII citation as verified.
 
 ---
 
-## Step 7 — Wire `POST /ask` and cost accounting
+## ~~Step 7 — Wire `POST /ask` and cost accounting~~ ✅ DONE
+
+> **Outcome.** `POST /ask` is wired and measured live: **23 of 23 eval questions served against real
+> Neo4j and pgvector, 0 failures, 0 unpriced rows**, all five `AskResponse` fields on all three
+> routes. **$0.1793 total, $0.0067 median per question, pooled p50 3,419 ms.** The Neo4j driver, a
+> `psycopg_pool.ConnectionPool(1, 4)`, the Cohere client and the warmed entity index are built once
+> in a lifespan hook, not per request — and startup **does not fail** on a store that is down:
+> `Handles.errors` records it, `/health` names it, `/ask` returns 503 naming it. Suite **483 → 525
+> tests** (42 in `test_api.py`); artifact `eval/ask-eval.jsonl`; per-route table in
+> `docs/metrics/answer-path.md:353`.
+>
+> **The replayed cost table was understating the live bill by nearly half on the most common route,
+> and the `graph` row is what proves it.** Live against replayed: **vector 1.47×** ($0.0043 →
+> $0.0063), **both 1.17×** ($0.0099 → $0.0116), and **`graph` 1.00×** — $0.008435 against $0.0084,
+> the same number. That is the cross-check, not a coincidence: route `graph` never enters the vector
+> path, so the replay had nothing to leave out. The gap on the other two routes is exactly the embed
+> and rerank round trip a sweep replays at $0.00. `answer-path.md:341` had recorded that debt rather
+> than publishing the sweep figure as a per-query cost, which is the only reason this is a
+> reconciliation and not a correction.
+>
+> **Latency moved the other way and the note refuses to claim the win.** `both` came in at 3.3 s live
+> against 5.3 s replayed, `graph` at 7.5 s against 9.4 s. A replayed row is not a faster row — these
+> were measured under different machine load on different days at n=8 and n=1 — so they are printed
+> as two tables rather than one delta.
+>
+> **No per-route p95 is published, and that was pre-registered.** The ns are **14 / 8 / 1**. A p95
+> over 8 observations is the maximum wearing a percentile's name and over 1 it is the observation;
+> `scoreboard()` does not compute one and `test_no_per_route_p95_is_published` makes that structural
+> rather than editorial. The pooled p95 of 20 s is a fact about the API key — three rows cleared 10 s,
+> and over the other **20** the p50 is 3,291 ms and the p95 is 7,463 ms, which is the figure to quote
+> for the handler.
+>
+> **Two of those three slow rows are the same ids that stalled in Step 4** — `hn-001` and `sh-006`,
+> at 83.5 s and 82.4 s then against 12.5 s and 24.8 s now. Same rows, a quarter of the margin, which
+> is consistent with retry backoff *and* with a less contended key alike. **n=1 per row**, recorded
+> as a recurrence to watch rather than as a finding.
+>
+> **`cost_usd` was widened to `float | None`**, closing the `query-path.md` §Open bullet that had
+> flagged the choice one step ahead. The "priced components only" flag was rejected because it puts a
+> number and its own trustworthiness in two fields, and a consumer reading the first without the
+> second under-reports silently; `null` cannot be added up by accident. No live route reaches the null
+> arm today, so it is held by a test that sets `RERANK_PRICE_PER_SEARCH` back to `None`.
+>
+> **Scope notes.** Three defects, two of them in the tests rather than the handler. A pool that fails
+> to open **leaves its workers running** — `reconnect_timeout` defaults to 300 s, so the worker
+> retries a database that is not there for five minutes and the interpreter cannot join it at exit.
+> The live route test asserted `graph` for a question **nobody had routed** — it was hand-written for
+> the test and the rules router correctly sent it to `vector`; the live tests now read questions out
+> of `eval/eval-questions.jsonl` **by id** and assert the gold label first. And the per-route
+> reconciliation test asserted `taken == gold`, which ADR-0012 had already measured to be false at
+> `th-004` — it now pins the known miss **by name**, so an *unnamed* disagreement is what fails.
+> Client-observed minus server-reported latency is **6.8 ms at p50**, so `latency_ms` accounts for
+> essentially the whole request. **Two non-refusal rows returned zero citations** (`sh-005`,
+> `th-004`) and `AskResponse` carries no diagnostics to say why — logged `OPEN`.
+
+## Step 7 — Wire `POST /ask` and cost accounting (original)
 
 Router → paths → assemble → generate → validate, returning all five `AskResponse` fields.
 
@@ -584,16 +715,41 @@ Router → paths → assemble → generate → validate, returning all five `Ask
 
 ---
 
-## Step 8 — Close-out
+## ~~Step 8 — Close-out~~ ✅ DONE
 
-- Strike Steps 0–7, each with a `> **Outcome.**` note in the shape used by
-  `plan-to-populate-hybrid-store.md`.
-- Fill the verification table below.
-- Confirm the **two Phase-3 `_TBD_`s** (`docs/failure-notes.md:39-40`) are filled. The other two
-  (lines 41-42) are Phase 5's and must stay open.
-- Write the phase's failure-notes entry and update the **Recurrence tracker** — including a new row
-  if this phase invents a new way to be wrong, which on the current record it will.
-- `pytest` green, with DB-backed tests skipping rather than reddening (`tests/conftest.py`).
+> **Outcome.** Steps 0–7 struck with outcome notes, the verification table filled, two failure-notes
+> entries written (Steps 6 and 7 — the two the file had no narrative for), the Recurrence tracker
+> extended by **one new row and two counts**, and one stale §Open bullet closed in
+> `docs/metrics/query-path.md`. No source file was modified and **no new number was measured**: every
+> figure is quoted from `answer-path.md`, `query-path.md`, the ADRs or the committed artifacts. A
+> close-out that measures is a step, not a close-out.
+>
+> **This step's own checklist was stale in two places and was corrected rather than obeyed.** It said
+> to confirm *"the two Phase-3 `_TBD_`s (`docs/failure-notes.md:39-40`) are filled"*. There is no
+> `_TBD_` at 39-40 and there has not been one for some time: those lines are mid-bullet in the
+> eval-set metadata rate. **Exactly two `_TBD_`s remain — *LLM-judge agreement* and *Benchmark
+> surprises* — and both are Phase 5's.** The Phase-3 one, *Citation-validation rejection rate*, was
+> converted into a full bullet by Step 6. So **nothing was left for Step 8 to fill**, and the correct
+> action was to say so.
+>
+> **That is the third time a line reference in this plan has gone stale, and the fourth happened while
+> writing this note.** Step 5's outcome note already corrected `39-40` to `66-68`; `66-68` is now
+> wrong too, because Step 6 added bullets above it. The `query-path.md` bullet closed here cited
+> `src/schemas.py:294` and was **already stale on the day it was written**. And the first draft of
+> this paragraph said the survivors were "at lines 105-106" — true when it was typed, false ten
+> minutes later, because adding Step 7's own measured-rate bullet pushed them to 116-117. Line
+> numbers into a document that grows are not addresses. **Every reference in this close-out therefore
+> names the bullet's label**, which is stable, and that convention is the one thing worth carrying
+> into Phase 5's plan.
+>
+> **`pytest` green, and the criterion is the containers-*down* arm**, which is what Step 8 actually
+> asks for: **464 passed, 61 skipped, 0 failed** in 269 s over the full 525. The DB-backed tests skip
+> rather than redden, by design (`tests/conftest.py` — `driver`, `pg`, `indexed`, `loaded` all call
+> `pytest.skip` on a broad `except`). **The containers-up arm was not run in this session**: Neo4j and
+> pgvector were unreachable on 7687/5432 because Docker lives in WSL2 and stops with the last shell,
+> and the close-out did not start them. So `525 / 0 skip` is **not** claimed here — the per-step rows
+> above report it because each step measured it at the time, and this row reports only what was
+> re-measured today.
 
 ---
 
@@ -641,13 +797,16 @@ Named so Phase 3 does not silently build on them.
 | ~~3~~ ✅ | ~~Both routers measured on 23 gold-labelled rows; ADR-0012 records the adoption *and* the loser's numbers; decision log appends rather than overwrites; `_TBD_` at `failure-notes.md:39` filled~~ — all confirmed; rules **21/22** adopted over R7B **10/22**, which also lost to the majority-class constant (**13/22**) and failed the pre-registered gate; R7B emitted `both` **0 of 23** times under two prompts; 38 new tests, suite 159 → **197**, 0 skipped with containers up |
 | ~~4~~ ✅ | ~~Recall per stratum re-measured with and without rerank against the ADR-0004 baseline; retrieval confirmed running at **512** dims; `vector-index.md` reranker §Open closed~~ — all confirmed; measured against a **512** baseline produced first from the unmodified harness, not against the published 1536 table; **+4 chunks at k=5 / +3 at k=10** clear the pre-registered ±2 resolution while **no per-stratum delta does**; the k=5 ceiling (45/51) corrected the step's own reporting instruction; 61 new tests, suite 197 → **258**, 0 skipped with containers up |
 | ~~5~~ ✅ | ~~Template selection measured against `ontology_edges`; prose uses `display_name`; every graph statement carries ≥1 `source_chunk_id`; derived edges identifiable in output~~ — all confirmed, and the first clause was measured to be nearly uninformative (ceiling **9/9**, constant floor **8/9**) so gold yield became the headline: rules **24 of 32 = the oracle** vs R7B **14 of 32**, whose 4-of-9 zero-row calls all passed `validate()`; prose asserted free of lowercase keys; zero dangling chunk ids across both stores; derived edges identifiable live but **inert on the eval set** and reported as inert; 68 new tests, suite 258 → **326**, 0 skipped with containers up |
-| 6 | Every cited `chunk_id` provably ∈ retrieved set; regenerate-once path exercised by a test, not by hope; `_TBD_` at `failure-notes.md:40` filled |
-| 7 | `POST /ask` returns all five `AskResponse` fields on all three routes; `cost_usd` is non-zero and per-route; p50/p95 recorded |
-| 8 | Steps struck with outcome notes; both Phase-3 `_TBD_`s filled and both Phase-5 ones untouched; failure-notes entry written; `pytest` green |
+| ~~6~~ ✅ | ~~Every cited `chunk_id` provably ∈ retrieved set; regenerate-once path exercised by a test, not by hope; `_TBD_` at `failure-notes.md:40` filled~~ — all confirmed, and the first clause holds **by construction**, which is published as the caveat rather than as the result: `generate()` only emits a `Citation` for an id in the reverse map of the documents it just sent, so **0 of 23** is a plumbing check that passed. The two checks that *can* fail came back clean on the same denominator (span defects **0 of 23**, uncited labels **0 of 23**), and `dropped` — the number that would move first — is **0 across 5 arms and 115 rows**. Regeneration **never fired live** and is exercised by a fake client asserting both the retry and that the second request is not byte-identical. The `_TBD_` was filled — the *Citation-validation rejection rate* bullet in `failure-notes.md` §Measured rates. 154 new tests, suite 329 → **483** |
+| ~~7~~ ✅ | ~~`POST /ask` returns all five `AskResponse` fields on all three routes; `cost_usd` is non-zero and per-route; p50/p95 recorded~~ — all confirmed live against real Neo4j and pgvector: **23 of 23 served, 0 failures, 0 unpriced**, $0.1793 total / $0.0067 median, pooled p50 **3,419 ms**. Per-route cost is non-zero on all three (`vector` $0.0063, `both` $0.0116, `graph` $0.0084) and the `graph` row **reconciles to the replayed table exactly**, which is what identifies the other two routes' 1.47×/1.17× gap as the skipped embed+rerank round trip. **No per-route p95 is published and that was pre-registered** — the ns are 14/8/1 and `test_no_per_route_p95_is_published` makes it structural; the p95 is pooled and labelled pooled. 42 new tests, suite 483 → **525** |
+| ~~8~~ ✅ | ~~Steps struck with outcome notes; both Phase-3 `_TBD_`s filled and both Phase-5 ones untouched; failure-notes entry written; `pytest` green~~ — Steps 0–7 struck; **the `_TBD_` clause was stale and was corrected rather than satisfied**: there is no `_TBD_` at `failure-notes.md:39-40`, exactly **two remain — *LLM-judge agreement* and *Benchmark surprises* — and both are Phase 5's**, the Phase-3 one having been converted to a full bullet by Step 6 — so none was left to fill and Step 8 says so. **Two** failure-notes entries written (Steps 6 and 7, the two the file had no narrative for), Recurrence tracker extended by one new row and two counts, one stale §Open bullet closed in `query-path.md`. `pytest` green: **464 passed / 61 skipped / 0 failed** over the full **525**, with the DB-backed tests skipping rather than reddening — which is the criterion as written. The containers-up arm was **not** re-run today (Neo4j/pgvector unreachable; Docker is in WSL2), and is not claimed |
 
-Run `pytest` after every step. The suite is **92 tests across 6 files** at the start of this phase
-(71 pass with no containers running; 21 skip on Neo4j/Postgres by design). Phase 3 should add test
-files for `src/query/` and `src/answer/`, which have **none** today.
+Run `pytest` after every step. The suite was **92 tests across 6 files** at the start of this phase
+(71 pass with no containers running; 21 skip on Neo4j/Postgres by design) and is **525 across 19
+files** at its close — **464 pass / 61 skip / 0 fail** with no containers running, re-measured at
+close-out on 2026-08-05.
+`src/query/` and `src/answer/`, which had **no** test file when this plan was written, now have
+eleven between them.
 
 **One standing rule, from this project's own record.** `docs/failure-notes.md` opens with it: *a
 change is marked `DONE` only if code in this repo enforces it; doing something once by hand is not

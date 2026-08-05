@@ -102,6 +102,17 @@ A change is marked `DONE` only if code in this repo enforces it.
   retrieved gold chunk. But `oos-001` is really **4 of 5**: the five arms sent it byte-identical
   documents and produced five different answers at `temperature=0, seed=42`, one of which cited 11
   documents for a question the corpus cannot answer.
+- Live `POST /ask`, 23 questions against real Neo4j and pgvector, one call each, adopted arm:
+  **23 of 23 served, 0 failures, 0 unpriced rows.** **$0.1793 total, $0.0067 median**; pooled p50
+  **3,419 ms**, pooled p95 **20,076 ms**. Per route — `vector` n=14 at $0.0063 / 3,996 ms, `both` n=8
+  at $0.0116 / 3,291 ms, `graph` n=1 at $0.0084 / 7,463 ms. **No per-route p95 is published and that
+  was pre-registered**: at n=8 a p95 is the maximum wearing a percentile's name, and
+  `test_no_per_route_p95_is_published` makes the omission structural. Read the pooled p95 as a fact
+  about the API key — three rows cleared 10 s, and over the other 20 the p50 is 3,291 ms and the p95
+  is 7,463 ms. **The live figures land 1.47× (`vector`) and 1.17× (`both`) above the replayed sweep,
+  and 1.00× on `graph`** — the route that never enters the vector path, which is what identifies the
+  gap as the skipped embed+rerank round trip rather than drift. Route agreement with the gold labels
+  is **22 of 23**, the miss being ADR-0012's recorded `th-004`. See `docs/metrics/answer-path.md`.
 - LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
 - Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
 
@@ -116,13 +127,14 @@ are changing address.** Every row is aggregated from write-ups further down — 
 | **A prompt few-shot example teaching the defect** | **3** | `RiskCategory` junk drawer (Example 2, since v1) · `LawfulBasis`/`PERMITS` collapse (ADR-0007) · `INTERACTS_WITH` collapsed to instrument level (ADR-0010) |
 | **Confirmed the part I looked at, assumed it covered the whole** | **7** | 13 annexes silently dropped · two-layout assumption when there were four · `dangling_refs` had no mirror (`orphan_entities`) · `definition_of` probed with a term that happened to be in an Article · `Chunk` rejection measured on the AI Act file and reported as the corpus (586/694 → really 1,000/1,108) · `_trim` verified against corpus names, reused on questions — no legal name ends in `?` · **`citation_options={"mode":"ACCURATE"}` read off the SDK enum, which is the union over every Cohere model; `command-a-03-2025` returns a 400 for it. The enum was confirmed; that it applied to this model was assumed** |
 | **A count mistaken for a shape** | **3** | `INTERACTS_WITH` at 130 edges, 0 of them article-level · endpoint *types* recorded in no histogram anywhere · **Command R7B at 45% accuracy — a weak-but-working classifier by the count, and by the distribution a three-way classifier that emitted `both` 0 of 23 times** |
-| **An interface neither side ever crossed** | **6** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · `chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases · `validate()` checks parameter *names*, the graph matches parameter *values*, and nothing checked that a validated call returns rows — 4 of R7B's 9 calls cleared ADR-0002's boundary and matched no node · **`LABEL_RE` vs the 41 gold citation labels it grades against: the specified `[^\s,;)]+` excludes `)` and stops *inside* the parenthesis, matching `AIA Art. 9(1` for 40 of the 41. Wrong by one character, and the regex had never been run against the strings it exists to match** |
+| **An interface neither side ever crossed** | **7** | `Chunk` vs the JSONL nobody validated against it · `schema.sql` vs a corpus nobody loaded · `entity_ids` vs a relationship nobody populated · `chunker.main()` vs the corpus it produces — 1,016 rebuilt where 1,108 are stored, unnoticed for five phases · `validate()` checks parameter *names*, the graph matches parameter *values*, and nothing checked that a validated call returns rows — 4 of R7B's 9 calls cleared ADR-0002's boundary and matched no node · **`LABEL_RE` vs the 41 gold citation labels it grades against: the specified `[^\s,;)]+` excludes `)` and stops *inside* the parenthesis, matching `AIA Art. 9(1` for 40 of the 41. Wrong by one character, and the regex had never been run against the strings it exists to match** · **Step 7's live route test vs the router nobody asked: the question was hand-written for the test and asserted `graph`; the rules router sent it to `vector`, correctly. The test and the router had never been introduced** |
 | **Verified once by hand, never encoded** | **5** | `aia-art9-para1` control · per-annex counts · production-key check (regressed `DONE` → `OPEN`) · the retry policy: Step 4 wrote down "the reranker had no retry, unlike every other API call site", and Step 5's new call site shipped without one too — a 429 scored the arm under measurement a zero · **Step 5's own pre-registration: the ceiling and oracle were computed by scripts in a temp directory outside the repo and transcribed as literals, in the same commit whose write-up bumped this row to 4** |
-| **A metric that looked like success** | **4** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans · `ontology_edges` selection accuracy: ceiling 9 of 9, best constant 8 of 9 — any selector scores ~90%. Caught by computing the constants before writing an arm · **`attempts` has been 1 at every API call site since it was introduced: `_call.retry.statistics` is permanently `{}` in tenacity ≥ 8.2.3, because the wrapper runs `copy = self.copy()` and assigns the copy's statistics to `wrapped_f.statistics` while `wrapped_f.retry` stays a controller that never executes. So `rerank_retried == []` was a tautology and "3 stalls, all with `attempts=1`, so this was not retry backoff" was a conclusion drawn from a field that could not report anything else** |
+| **A metric that looked like success** | **5** | 0% validation failure on the pilot · 0 orphan reports because nothing looked for orphans · `ontology_edges` selection accuracy: ceiling 9 of 9, best constant 8 of 9 — any selector scores ~90%. Caught by computing the constants before writing an arm · **`attempts` has been 1 at every API call site since it was introduced: `_call.retry.statistics` is permanently `{}` in tenacity ≥ 8.2.3, because the wrapper runs `copy = self.copy()` and assigns the copy's statistics to `wrapped_f.statistics` while `wrapped_f.retry` stays a controller that never executes. So `rerank_retried == []` was a tautology and "3 stalls, all with `attempts=1`, so this was not retry backoff" was a conclusion drawn from a field that could not report anything else** · **The replayed per-route cost table, which replays the vector half from `rerank-eval.jsonl` at $0.00 and would have been read as a per-query cost. Live, `vector` is **1.47×** it and `both` **1.17×** — a 47% understatement on the route 14 of 23 questions take. It did not ship as a finding only because `answer-path.md:341` wrote the debt down instead of publishing the number** |
 | **A key derived from a field, and the field then dropped** | **1** | `section` folded into the annex chunk_id and never written as a column — 25 chunks, 11 ambiguous citation labels |
 | **A number that measured the instrument instead of the subject** | **2** | **Comparing post-rerank@5 against pre-rerank@10 — a 9.8pp handicap made entirely of the gold-count distribution (`ag-001` has 11 gold chunks), which the phase plan itself specified. Caught by computing `Σ min(gold_i, k)` before running anything** · **Rerank p95 of 83 s, which measured a trial key holding a request open, not Rerank 3.5. Caught by recording `attempts` and finding all of them 1** |
 | **A container non-empty because of its shape, not its content** | **1** | `collect(DISTINCT {chunk: rel.source_chunk_id})` on a missed `OPTIONAL MATCH` returns `[{chunk: null}]`, not `[]` — one fake citation that passes every `if provenance:` check. **Caught by a probe before it was written**, which is the only reason the count is 1 and not a defect |
 | **A determinism control that does not control** | **2** | `temperature=0, seed=42` on Command R7B returned 16 then 14 gold hits over the same 23 questions, with plans differing on several rows. Cohere's `seed` is best-effort, so the model arm cannot have the byte-exact reproduction test the rules arm has — which is itself part of what ADR-0013 weighs · **The same settings on Command A: `oos-001` routes `vector`, so all five budget arms sent it byte-identical documents, and it came back with five different answers — four declining with zero citations and one citing 11 documents for a question the corpus cannot answer. The step's 4-of-4 refusal result is really 4-of-5 on that row** |
+| **A resource whose failure path keeps working** | **1** | **`psycopg_pool.ConnectionPool` reports a failed `open()` correctly into `Handles.errors` — and its background worker then retries a database that is not there for `reconnect_timeout`'s default **300 seconds**, so the interpreter cannot join the thread at exit (`couldn't stop thread 'pool-1-worker-0'`). The error handling was right; the resource behind it had not stopped. Nothing in the failure report says the thing that failed is still running** |
 | **A premise about the code that was true, and an inference from it that was false** | **1** | **Step 6 was designed around "the graph path's headline was scored on a set that cannot reach a citation": `path_to_prose` sets `chunk_id = chunks[0]` and the rest survive only as label text. The description is exactly right. The inference — that `oracle_primary` must sit well below the 24 of 32 `oracle_provenance` — is wrong, and only measuring said so: with 389–642 statements per row, every gold chunk in the union is also the lexicographic minimum of *some* statement's provenance, so all three oracles are 24. The widening the step was built to justify was still worth making; the defect it was built to repair did not exist** |
 
 **What the shape of this table says.** The top row is the most expensive class — three defects, all
@@ -160,6 +172,24 @@ three call sites, was excluded from two published percentiles, and carried a con
 `query-path.md` — and it was structurally incapable of ever returning anything but 1. **The remedy
 for "verified once by hand, never encoded" is an instrument, and an instrument is a thing that can
 itself be wrong in exactly the way it was built to prevent.**
+
+**This table closes Phase 3 at twelve rows, and its two newest — Step 6's and Step 7's — are the two
+that resist the document's standing remedy.** Everywhere above, the fix is *encode it* — turn the hand
+check into a test, the transcribed literal into a computation, the remembered caveat into an
+assertion. Neither new row can be closed that way. *"A premise about the code that was true, and an
+inference from it that was false"* was produced by careful reading, and no test can be written
+against a conclusion nobody has drawn yet; what caught it was measuring the thing before building on
+it. *"A resource whose failure path keeps working"* was produced by a library behaving as documented,
+and it is invisible to every assertion about the error, because the error was reported correctly —
+what caught it was running the program in the state it fails in.
+
+So the phase's honest summary is that the remedy for most of this document is an instrument, and the
+remedy for the rest is doing the thing early and in the conditions you expect to be wrong in. Neither
+substitutes for the other. **Of the four model-vs-deterministic contests this phase ran, the
+deterministic arm won three and the fourth had no contender** — which is now a pattern with enough
+instances (ADR-0009, ADR-0012, ADR-0013, ADR-0014) that the next phase should treat "build both and
+measure" as the default rather than as the careful option, and should budget for the deterministic
+one winning.
 
 ---
 
@@ -1574,3 +1604,208 @@ carefully it was made.
 There is a smaller, more uncomfortable version: I checked whether Step 5's *findings* were sound far
 more carefully than whether Step 5's *record* of them was reproducible. The first is what makes the
 work interesting; the second is what makes it work.
+
+---
+
+# Phase 3 Step 6: the premise was right, the inference was wrong, and what broke was the markup
+
+Written 2026-08-05, building context assembly, grounded generation and citation validation.
+
+**What happened.** Two things, and neither was the thing the step was scoped around.
+
+The step was designed to solve a problem Step 5 handed it — 2,886 graph statements over 9 questions
+with nothing to rank them by — and, alongside it, to repair a boundary defect. The defect was
+described like this: `path_to_prose` sets `chunk_id = chunks[0]` and the remaining provenance chunks
+survive only as label text, so a `Citation`, which carries `chunk_id` alone, can only ever address
+one chunk per statement. ADR-0013's headline of **24 of 32** was therefore scored on a set richer
+than anything a citation could reach, and `oracle_primary` had to sit well below it.
+
+Every clause of that description is correct. The conclusion is false. `preregister()` computed all
+three oracles before a single budget arm was written:
+
+```
+oracle_provenance   25 routed / 24 scored   every chunk any returned row asserts
+oracle_shown        25 routed / 24 scored   chunks rendered into a statement's own text
+oracle_primary      25 routed / 24 scored   chunk_id alone -- what a Citation carries
+```
+
+They are equal. With 389–642 statements per row, every gold chunk in the union is also the
+lexicographic minimum of *some* statement's provenance, so nothing was lost at the boundary at all.
+`24 of 32` reproduced ADR-0013 to the chunk, through a different code path.
+
+The second thing is what actually breaks the graph path, and no one had predicted it. **Three of five
+budget arms truncated**, all for one reason: Command A emits its own `<co>…</co>` citation training
+format into the answer **text**, and once it starts it runs to `max_tokens`. It is not document count.
+`ag-001` isolates that — `rerank` and `first` sent it exactly **50** documents drawn from the same 389
+statements; `rerank` collapsed, `first` returned `COMPLETE` with 50 citations and the same 4 gold
+chunks. From the other direction, `th-001` collapses at 55 documents under `anchor` and is clean at
+405 under `first`. What tracks it is **document monotony**: `anchor`'s 50-document set for `th-001` is
+48 documents sharing one sentence frame. Every arm that *ranks* graph statements concentrates
+near-duplicates, because near-duplicates are what the graph path produces in bulk, and **the unranked
+constant does not**.
+
+**Why it mattered.** The first would have been an expensive confusion rather than a defect. Had the
+five arms been built first and the oracles computed afterwards, the equality would have arrived as an
+unexplained result in the middle of a sweep that cost $1.24, and the obvious reading — "the budget
+arms are not discriminating" — would have been wrong in a way that took a day to unpick.
+
+The second mattered more, because it inverts the step's whole design. The plan assumed ranking the
+statements was the lever and the cap was the crude fallback. Measured: **the cap costs 15 of 25
+reachable gold chunks and the best-to-worst spread among capped arms is 6.** The budget is the lever;
+what you keep inside it is nearly noise. And the one arm with a structural reason to beat the constant,
+`roundrobin`, is **−4** against it — which does clear ADR-0004's ±2 resolution, in the wrong direction.
+The constant was adopted **and not on retention**: it is the only one of five arms that produced a
+scored answer on all 23 rows.
+
+**What caught it.** Pre-registration, on the first attempt, exactly as Step 5's addendum said to do it
+— `preregister()` runs against the live graph at **$0.00** with no key, and `scoreboard()` sums the
+oracles from the committed artifact with **no oracle literal anywhere in `src/`**. That was Step 5's
+own remedy for its own recurrence, applied one step later to a different question, and it worked.
+
+The `<co>` leak was caught by reading the answers rather than the scoreboard. The truncation showed up
+as `MAX_TOKENS` finish reasons; what it was doing to the text was only visible by looking at the text.
+
+**What I changed.**
+
+- `DONE` ADR-0014 adopts `first` at N=50 and records the four rejected arms with their numbers,
+  including that the rejection is not on retention. `RESOLUTION_CHUNKS` is reused so "+2 is not a
+  difference" is enforced rather than asserted.
+- `DONE` The three checks are computed on **one denominator** and published together — rejection
+  **0 of 23**, span defects **0 of 23**, uncited labels in prose **0 of 23** — with the first labelled
+  near-tautological in the document that publishes it, not in a footnote.
+- `DONE` `GenerationResult.dropped` counts malformed, tool-sourced, duplicate and invented citations
+  per row, so a silent zero and a silently-swallowed twelve look different in the artifact. It is **0
+  across all 5 arms and 115 rows**.
+- `DONE` `_call.statistics` replaces `_call.retry.statistics` at **all three** API call sites.
+- `DONE` `LABEL_RE` is asserted by `fullmatch` against every one of the 41 distinct gold citation
+  labels in the committed eval set.
+- `DONE` `test_the_statement_count_reconciles_with_query_path_md` holds the 2,886 shared between two
+  metrics documents, so they cannot drift apart silently.
+- `OPEN` **The `<co>` leak is characterised, not explained.** Monotony tracks it across 5 arms × 23
+  rows plus 4 hand probes; document count does not. That is a correlation. The controlled sweep —
+  synthesised document sets at fixed count and varying frame diversity — is cheap and was not run.
+- `OPEN` **N was pre-registered at 50 and the retention curve says 100 is better** (`first` 8 → 17,
+  `anchor` 10 → 18). N was deliberately not moved after seeing that, because moving it is the tuning
+  pre-registration exists to prevent.
+- `OPEN` **`content_blocks` is 1 on every row**, so the `content_index` rebasing this step was most
+  built around never fired against a real response. It is insurance, pinned by a test, not a measured
+  fix.
+
+**What I learned.** Everywhere else in this document, a careful reading of the code would have caught
+the defect. Here the careful reading *is* the defect. The premise about `path_to_prose` was not
+sloppy — it was precise, it was checked against the source, and it was true. What made the inference
+false was a property of the *data*: how many statements a row actually renders. No amount of reading
+the function could have supplied that, because the function does not know it either.
+
+So the lesson is not "read more carefully". It is that a claim about code and a claim about what the
+code will do to this corpus are different claims, and the second one is measurable. I have now been
+wrong in both directions in adjacent steps — Step 5 transcribed a measurement it had made outside the
+repo, and Step 6 reasoned its way to a conclusion it could have measured in ten minutes for nothing.
+
+The smaller lesson is about `attempts`. It was added in Step 4 *because* this document said to encode
+the retry policy rather than verify it by hand. It was read at three call sites, excluded from two
+published percentiles, and carried a conclusion in `query-path.md`. And since tenacity 8.2.3 it is
+structurally incapable of returning anything but 1, because the wrapper assigns a *copy's* statistics
+to `wrapped_f.statistics` while `wrapped_f.retry` stays a controller that never executes. **The remedy
+for "verified once by hand, never encoded" is an instrument, and an instrument is a thing that can
+itself be wrong in exactly the way it was built to prevent.**
+
+---
+
+# Phase 3 Step 7: the pool would not close, and the replayed bill was half the real one
+
+Written 2026-08-05, wiring `POST /ask` and per-route cost accounting.
+
+**What happened.** The endpoint itself went in without drama — router → paths → assemble → generate →
+validate, all five `AskResponse` fields, **23 of 23 eval questions served against live Neo4j and
+pgvector with 0 failures and 0 unpriced rows**. Three things went wrong around it, and two of them
+were in the tests.
+
+**The pool.** Starting the app with Postgres down printed this on every run:
+
+```
+couldn't stop thread 'pool-1-worker-0' within 5.0 seconds
+```
+
+`psycopg_pool.ConnectionPool` defaults `reconnect_timeout` to **300 seconds**. The pool's `open()`
+correctly gave up after 5 s and reported the failure into `Handles.errors`, which is the design —
+startup does not fail on a store that is down. Its background worker then carried on retrying a
+database that was not there for another five minutes, and the interpreter could not join it at exit.
+
+**The bill.** Step 6's per-route cost table was computed from a sweep that replays the vector half
+from `rerank-eval.jsonl` at $0.00. `answer-path.md:341` recorded that as a debt rather than publishing
+it as a per-query cost. Paying it live:
+
+```
+route     replayed    live       ratio
+vector    $0.0043     $0.0063    1.47x
+both      $0.0099     $0.0116    1.17x
+graph     $0.0084     $0.008435  1.00x
+```
+
+**Two tests asserted things that were already known to be false.** The live route test hand-wrote a
+question, asserted it would route `graph`, and went red — because the rules router sent it to
+`vector`, correctly, since nothing in its shape fires R3. And the per-route reconciliation test
+asserted `taken == gold`, i.e. that the router is perfect, which ADR-0012 had measured to be false at
+`th-004` two steps earlier and recorded as a deliberate non-repair.
+
+**Why it mattered.** The pool one is a shutdown hang on the developer path, not a request-path defect
+— but it is the kind that gets diagnosed as "pytest is slow" for a week.
+
+The bill is the one that would have been published. `vector` is the most common route on this eval
+set (14 of 23), and a cost table understating it by **47%** is exactly the artefact a reader would
+quote as the project's per-query cost. What makes it a reconciliation instead of a correction is the
+`graph` row: it comes in at 1.00× because route `graph` never enters the vector path, so the replay
+had nothing to leave out. The one route where the two methods *should* agree is the one where they do,
+which is what identifies the gap on the other two as the skipped embed and rerank round trip rather
+than as noise or drift.
+
+The tests are the more embarrassing pair. Both encode an expectation the repository had already
+measured and written down. The second is worse than the first: it would have gone **red on correct
+behaviour that the same document explains**, and the cheapest repair — changing the router until the
+test passes — would have silently reversed ADR-0012's recorded decision to leave `th-004` alone.
+
+**What caught it.** The pool, by running the app with the containers down, which is the state this
+machine is in by default because Docker lives in WSL2 and stops when the last session closes. The
+bill, by `answer-path.md:341` having written the debt down one step earlier — the live sweep was run
+*because* a line in a metrics document said a number was missing. The tests, by running them.
+
+**What I changed.**
+
+- `DONE` `reconnect_timeout=POOL_OPEN_TIMEOUT`, `connect_timeout` in `kwargs`, and an explicit
+  `close()` on a pool that failed to open.
+- `DONE` The live tests read questions out of `eval/eval-questions.jsonl` **by id** and assert the
+  gold label first, so the expectation belongs to the eval set rather than to me.
+- `DONE` `test_the_per_route_ns_reconcile_with_adr_0012s_recorded_miss` pins the known miss **by
+  name**. An *unnamed* disagreement is what fails, so repairing `th-004` on purpose is a one-line
+  change and repairing it by accident is a red test.
+- `DONE` `test_no_per_route_p95_is_published` — the per-route ns are 14 / 8 / 1, and a p95 over 8
+  observations is the maximum wearing a percentile's name. `scoreboard()` does not compute one; the
+  pooled p95 is computed once and labelled pooled.
+- `DONE` `test_the_served_latency_is_bounded_by_what_the_client_observed` asserts the ordering on
+  every row. The gap is **6.8 ms at p50**, so `latency_ms` accounts for essentially the whole request.
+- `DONE` `AskResponse.cost_usd` widened to `float | None`, with the null arm exercised by
+  monkeypatching `RERANK_PRICE_PER_SEARCH` back to `None` rather than by waiting for the aggregator
+  figure to be withdrawn.
+- `OPEN` **`/ask` is measured single-threaded.** The sweep issues one request at a time through
+  `TestClient`, so `max_size=4`, the shared Cohere client and the shared Neo4j driver have never been
+  under concurrent load. The pool exists on the argument that a `def` handler runs in a threadpool,
+  not on a measurement that it needs to.
+- `OPEN` **Two non-refusal rows returned zero citations** — `sh-005` and `th-004`. `ask-eval.jsonl`
+  records the count and not the reason, because `AskResponse` carries no diagnostics.
+- `OPEN` **The decision-log `fsync` is on the request path and is not separately timed.** At a 3.4 s
+  p50 it is invisible, which is the argument for keeping it and also the reason nothing here can say
+  what it costs.
+
+**What I learned.** A replayed measurement and a live one are not the same measurement even when they
+run the same code, and the honest way to find out by how much is to keep one route where they must
+agree. I did not design the `graph` route as a control — it is a control by accident, because it
+happens not to touch the half that was being replayed. The lesson worth keeping is to look for that
+row deliberately next time, rather than being grateful it existed.
+
+The tests are a different lesson and it is the one I keep relearning in new costume. Both of them
+asserted what I expected rather than what the project had measured, and in both cases the measurement
+was written down, in this repository, by me, days earlier. `th-004` has its own paragraph in ADR-0012
+and its own §Open bullet in `query-path.md`. Writing a finding down is not the same as remembering it
+at the moment it contradicts you, and the fix that works is not memory — it is making the test read
+the finding out of the file where it lives.
