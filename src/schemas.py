@@ -335,8 +335,32 @@ class AskRequest(BaseModel):
 
 
 class AskResponse(BaseModel):
+    """What `POST /ask` returns. Five fields, one of which can be `null`.
+
+    `cost_usd` was `float` and required until Step 7. It could not be filled:
+    `price_of` (`src/config.py:105`) returns `float | None` and its docstring
+    makes the propagation rule explicit -- *"None must propagate rather than be
+    treated as zero -- a route that includes an unpriced call has an unknown
+    total cost, and reporting it as a number that happens to be short by the
+    rerank cost is worse than reporting that it is unknown."* A required `float`
+    forces exactly the coercion that rule forbids, so the field is widened and
+    `null` is the wire form of "this route used a component with no known rate".
+
+    Today every route prices, because `RERANK_PRICE_PER_SEARCH` is a number. It
+    is the one rate in this repo with no first-party source (`config.py:88-91`),
+    and the honest state if that aggregator figure is withdrawn is `None`. The
+    field is widened now so that withdrawal is a config edit rather than an API
+    change, and `tests/test_api.py` exercises the null arm by setting the
+    constant back rather than waiting for the day it happens.
+
+    `latency_ms` is measured around the whole handler, not around the model call,
+    so it is strictly larger than `AnswerResult.latency_ms` -- which is the sum
+    of five stage timers and does not include routing overhead, connection
+    checkout, serialisation, or the decision-log write.
+    """
+
     answer: str
     citations: list[Citation] = Field(default_factory=list)
     route: Route
     latency_ms: float
-    cost_usd: float
+    cost_usd: float | None

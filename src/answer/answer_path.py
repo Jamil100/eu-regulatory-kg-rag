@@ -92,6 +92,7 @@ __all__ = [
     "PREREG_KEY",
     "PASSAGE_TOP_N",
     "AnswerPathError",
+    "NoContextError",
     "AnswerResult",
     "answer",
     "sweep",
@@ -129,6 +130,20 @@ class AnswerPathError(RuntimeError):
 
     Deliberately not `SystemExit`, for the reason `RouterError` gives at
     src/query/router.py:101 -- this runs inside a FastAPI worker at Step 7.
+    """
+
+
+class NoContextError(AnswerPathError):
+    """The route ran and produced no documents. Nothing failed.
+
+    A subclass rather than a flag or a message string, so `/ask` can answer 422
+    ("there was nothing to ground an answer in") where every other
+    `AnswerPathError` is a 502 ("a dependency failed"). Matching on the message
+    would be the recurrence tracker's *"an interface neither side ever crossed"*
+    in its usual costume.
+
+    Because it is a subclass, every existing `except AnswerPathError` -- the CLI,
+    `sweep`, `preregister` -- catches it exactly as before.
     """
 
 
@@ -314,7 +329,7 @@ def answer(
     retrieval_cost += (assembly.rerank.cost_usd or 0.0) if assembly.rerank else 0.0
 
     if not assembly.documents:
-        raise AnswerPathError(
+        raise NoContextError(
             f"route {route!r} produced no documents for {question!r}; there is "
             f"nothing to ground an answer in"
         )
