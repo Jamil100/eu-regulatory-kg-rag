@@ -11,7 +11,13 @@ Command A leaks `<co>` citation markup into the answer, and every arm that
 *ranks* graph statements triggers it. Citation-validation rejection **0 of 23**,
 span defects **0 of 23**, uncited labels in prose **0 of 23**. All four refusal
 rows behave correctly under the adopted arm.**
-Phase 3 Step 6 complete. Step 7 appends the per-route latency and cost table.
+Phase 3 Steps 6 and 7 complete. **`POST /ask` is wired and measured live**: 23
+of 23 questions served against real Neo4j and pgvector, **$0.1793 total, $0.0067
+median per question, 3.4 s pooled p50**, every route non-zero and nothing
+unpriced. The live figures land **1.47× (vector) and 1.17× (both)** above the
+replayed sweep costs below, and **1.00× on `graph`** — which is the cross-check,
+not a coincidence: route `graph` never runs the vector path, so there was nothing
+for the replay to omit.
 
 Sixth companion to `extraction-cost-and-findings.md`, `graph-load.md`,
 `eval-set.md`, `vector-index.md` and `query-path.md`. That one measures what
@@ -34,6 +40,12 @@ python -m src.answer.answer_path --eval --refresh --budget uncapped   -n 50
 
 # Every number below, from the committed artifact. No DB, no key, no spend.
 python -m src.answer.answer_path --eval
+
+# Step 7: the same pipeline through the HTTP handler, per route.
+python -m src.api.ask_eval --eval             # the live table, from the artifact
+python -m src.api.ask_eval --eval --refresh   # re-run all 23 through /ask (~$0.18)
+python -m src.api.ask_eval --question "..."   # one question through the endpoint
+pytest tests/test_api.py
 ```
 
 `scoreboard()` is pure and `eval/answer-eval.jsonl` is committed, so the last
@@ -338,6 +350,73 @@ The graph half remains **$0.00** in API terms: `rerank` was not adopted, so rout
 `graph` never became non-free. Its 9.4 s p50 is one row (`ag-001`) and is Neo4j
 plus a 50-document generation, not an API tier.
 
+### The live figure Step 7 owed (2026-08-05)
+
+23 questions through `POST /ask` against live Neo4j and pgvector, one call each,
+on the adopted arm. Nothing replayed: every row paid its own embed, rerank,
+graph traversal and generation, plus routing, connection checkout, serialisation
+and the decision-log fsync. **23 of 23 served, 0 failures, 0 unpriced rows.**
+
+| route | n | cost, median (min–max) | latency p50 (min–max) | citations, median |
+|---|---|---|---|---|
+| `vector` | 14 | **$0.0063** ($0.0047–$0.0082) | **3,996 ms** (1,299–24,767) | 2 |
+| `both` | 8 | **$0.0116** ($0.0046–$0.0129) | **3,291 ms** (2,607–20,076) | 6 |
+| `graph` | 1 | **$0.0084** | **7,463 ms** | 50 |
+| pooled | 23 | $0.1793 total, $0.0067 median | p50 **3,419 ms**, p95 20,076 ms | 4 |
+
+**The `graph` row is the cross-check, and it reconciles exactly.** Live
+$0.008435 against the replayed table's $0.0084 — the same number, because route
+`graph` never enters the vector path and the replay therefore had nothing to
+leave out. Where the replay *did* leave something out, the gap is the embed and
+rerank round trip it skipped: **vector 1.47×** ($0.0043 → $0.0063) and **both
+1.17×** ($0.0099 → $0.0116). A replayed cost table understating the live bill by
+half on the most common route is the reason `:341` recorded the debt instead of
+publishing the sweep figure as a per-query cost.
+
+**Latency moved the other way, and the reason is the same one.** `both` came in
+at 3.3 s live against 5.3 s replayed and `graph` at 7.5 s against 9.4 s. A
+replayed row is not a faster row; the two numbers were measured under different
+machine load on different days at n=8 and n=1. Nothing here supports a claim
+that `/ask` is faster than the sweep — only that these are not the same
+measurement, which is why they are printed as two tables rather than one.
+
+**No per-route p95 is published, and that was pre-registered.** The ns are 14,
+8 and 1. A p95 over 8 observations is the maximum wearing a percentile's name
+and over 1 it is the observation; `scoreboard()` does not compute one, and
+`test_no_per_route_p95_is_published` makes that structural rather than
+editorial. The pooled p95 is computed once, over all 23 rows, and labelled
+pooled.
+
+**The pooled p95 of 20 s is a fact about the API key, exactly as
+`query-path.md:429-434` says.** Three rows cleared 10 s — `sh-006` 24.8 s,
+`xr-002` 20.1 s, `hn-001` 12.5 s. Over the other **20** rows the p50 is
+**3,291 ms** and the p95 is **7,463 ms**, which is the figure to quote for the
+handler.
+
+**Two of those three rows are the same ids that stalled in Step 4** — `hn-001`
+and `sh-006`, at 83.5 s and 82.4 s then against 12.5 s and 24.8 s now. Step 6's
+correction (`query-path.md:436-451`) retracted the "not retry backoff"
+conclusion and said re-running a sweep is what would settle it. This is a
+partial re-run and it does not settle it: the same rows are still the slowest,
+but by a quarter of the margin, which is consistent with retry backoff *and*
+with a less contended key. **n=1 per row.** Recorded as a recurrence to watch,
+not as a finding.
+
+**Client-observed minus server-reported is 6.8 ms at p50** (max 16.2 ms), so
+`AskResponse.latency_ms` accounts for essentially the whole request and the
+handler's clock is not hiding a serialisation cost. Both columns are in the
+artifact; `test_the_served_latency_is_bounded_by_what_the_client_observed`
+asserts the ordering holds on every row, which is what makes them two
+measurements rather than two guesses.
+
+**Route agreement with the gold labels is 22 of 23**, and the one disagreement
+is `th-004` — ADR-0012's recorded miss, left unrepaired because the repair moves
+`oos-002` the wrong way. So the served ns are **14 / 8 / 1** where the gold
+labels are 13 / 9 / 1. Pinned by name in
+`test_the_per_route_ns_reconcile_with_adr_0012s_recorded_miss`, whose first
+version asserted the two agreed — a claim ADR-0012 had already measured to be
+false.
+
 ---
 
 ## Defects found on the way in
@@ -349,6 +428,9 @@ plus a 50-document generation, not an API tier.
 | The plan's `LABEL_RE` excluded `)` | `[^\s,;)]+` stops *inside* the parenthesis, matching `AIA Art. 9(1` — 40 of the 41 distinct gold labels, wrong by one character | rewritten to match `Art. N`, `Annex R` and nested `(x)(y)` parts; asserted `fullmatch` against every label in the committed eval set |
 | Each arm published its own denominator | 28 of 51 against 28 of 47, never measured on the same rows | `scoreboard()` computes a common denominator and the report prints both, labelled |
 | The CLI crashed after the answer printed | a `↳` glyph against a cp1252 Windows console — after the money was spent | ASCII only in `_print_answer` |
+| **(Step 7)** A pool that fails to open leaves its workers running | `couldn't stop thread 'pool-1-worker-0' within 5.0 seconds` on every start with Postgres down — `reconnect_timeout` defaults to **300 s**, so the worker retries a database that is not there for five minutes and the interpreter cannot join it at exit | `reconnect_timeout=POOL_OPEN_TIMEOUT`, `connect_timeout` in `kwargs`, and an explicit `close()` on the failed pool |
+| **(Step 7)** The live route test asserted a route for a question nobody routed | the question was hand-written for the test, asserted `graph`, and the rules router sent it to `vector` — correctly, since nothing in its shape fires R3 | the live tests read questions out of `eval/eval-questions.jsonl` **by id** and assert the gold label first, so the expectation is the router's own |
+| **(Step 7)** The per-route reconciliation test asserted the router is perfect | `taken == gold` — which ADR-0012 had already measured to be false at `th-004`, so the test would have gone red on correct behaviour it documented itself | the known miss is pinned **by name**; an unnamed disagreement is what fails |
 
 ---
 
@@ -388,3 +470,31 @@ plus a 50-document generation, not an API tier.
   `generate` drops a bad citation before `validate` sees it. The number that
   would move is `GenerationResult.dropped`, which is recorded per row and is 0
   across all five arms — worth watching rather than publishing.
+- **Two non-refusal rows came back with zero citations** (Step 7). `oos-001` and
+  `oos-002` are refusals and 0 is correct for both. `sh-005` and `th-004` are
+  not: they are a single-hop Annex III question and the two-hop row ADR-0012
+  misroutes, and both produced prose with nothing attached. `ask-eval.jsonl`
+  records the count and not the reason, because `AskResponse` carries no
+  diagnostics — `answer_path --question` on those two ids is what would say
+  whether the documents were wrong or the model declined to cite them.
+- **`cost_usd: float | None` has a null arm that no live route can reach.**
+  Every route prices today because `RERANK_PRICE_PER_SEARCH` is a number, and it
+  is the one rate in this repo with no first-party source. The arm is exercised
+  by monkeypatching the constant back to `None`
+  (`test_cost_usd_serialises_as_null_when_a_component_is_unpriced`) rather than
+  by waiting for the aggregator figure to be withdrawn.
+- **The decision-log write is on the request path and is not separately timed.**
+  `decision_log.append` does `flush()` + `os.fsync()` per row inside the
+  handler's own clock. At a 3.4 s p50 it is not visible, which is the argument
+  for keeping it; it is also the reason nothing here can say what it costs. A
+  step that wants the number should time the `finally` block, not infer it.
+- **`/ask` is measured single-threaded.** The sweep issues one request at a time
+  through `TestClient`, so `max_size=4` on the pool, the shared `cohere.ClientV2`
+  and the shared Neo4j driver have never been under concurrent load. Nothing
+  here is evidence about throughput, and the pool exists on the argument that a
+  `def` handler runs in a threadpool rather than on a measurement that it needs
+  to.
+- **The p95 is pooled over three routes with different work in them.** 20 s
+  mixes a 5-document vector answer with a 50-document graph one. It is published
+  because the per-route ns cannot carry a p95, not because pooling them is
+  meaningful; the 100-row set is what would let each route have its own.

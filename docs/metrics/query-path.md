@@ -11,11 +11,12 @@ graph path now runs end to end: deterministic template selection reaches **24 of
 32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
 and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
 rows at all.**
-Phase 3 Steps 2–5 complete. **Step 6 is measured in
+Phase 3 Steps 2–5 complete. **Steps 6 and 7 are measured in
 `docs/metrics/answer-path.md`** — split out because this file is already 650+
 lines and because generation, citation validation and the statement budget are a
-different subject from retrieval. Step 7's per-route latency and cost table
-appends there too.
+different subject from retrieval. **Step 7's live per-route latency and cost
+table is there**, beneath the replayed sweep table it corrects: 23 of 23
+questions through `POST /ask`, $0.0067 median per question, 3.4 s pooled p50.
 
 Fifth companion to `extraction-cost-and-findings.md` (what came out of the
 model), `graph-load.md` (what came out of the loader), `eval-set.md` (the
@@ -687,14 +688,28 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
   would make two-hop's +1 either a finding or a nothing.
 - **The rerank rate has no first-party source.** See above. `search_units` is
   measured; the dollars are not.
-- **`AskResponse.cost_usd` is `float` and required (`src/schemas.py:294`).** It
+- ~~**`AskResponse.cost_usd` is `float` and required (`src/schemas.py:294`).** It
   can now be filled for the vector route, but only because `RERANK_PRICE_PER_SEARCH`
   is a number rather than `None`. If that constant ever goes back to `None` — the
   honest state if the aggregator figure is withdrawn — the field cannot represent
   the route's cost. Step 7 has to decide between `float | None` and a
-  "priced components only" flag; this is flagged now so it is not discovered then.
+  "priced components only" flag; this is flagged now so it is not discovered then.~~
+  → **CLOSED by Step 7 (2026-08-05): widened to `float | None`** at
+  `src/schemas.py:366`. (This bullet's `:294` was already stale when it was
+  written; the field had moved.) The flag option was rejected because it puts a
+  number and its own trustworthiness in two fields, and a consumer that reads the
+  first without the second under-reports silently — which is the failure
+  `price_of`'s docstring forbids in the first place. `null` cannot be added up by
+  accident. Today no live route reaches it: all 23 rows priced, 0 unpriced. The
+  arm is held by a test that sets the constant back to `None` rather than by
+  waiting for the day the rate is withdrawn.
 - **Rerank latency is unmeasured on a production key.** 286 ms p50 comes from 20
   clean calls on a trial key whose tail behaviour is visible in the stalls above.
+  **Step 7 partially re-ran this and it did not settle** (2026-08-05): the same
+  two ids, `hn-001` and `sh-006`, are again the slowest end-to-end rows, at
+  12.5 s and 24.8 s against 83.5 s and 82.4 s here. Same rows, a quarter of the
+  margin — consistent with retry backoff and with a less contended key alike, at
+  n=1 per row. See `answer-path.md`.
 - **The rules number is in-sample and the eval set cannot currently say by how
   much.** Nothing here is a held-out measurement. The 100-row set is the only
   thing that resolves it, and the honest prior is that 95% will fall.
