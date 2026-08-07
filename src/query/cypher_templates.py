@@ -1,8 +1,8 @@
 """Parameterized Cypher template library.
 
 The model chooses a template and fills parameters; the query text is fixed.
-This is a security control (no injection), a reproducibility control, and an
-interview talking point. Never let the model write raw Cypher.
+This is both a security control (no injection) and a reproducibility control.
+Never let the model write raw Cypher.
 
 Every template projects distinct node tuples AND the per-edge provenance behind
 them, and the way it does that is load-bearing rather than tidiness. The graph

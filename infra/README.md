@@ -2,7 +2,7 @@
 
 Terraform for provisioning **Azure Database for PostgreSQL Flexible Server**
 (with the `vector` extension) as a managed alternative to the local Docker
-Postgres. A strong extra signal given the IaC background.
+Postgres.
 
 ## Usage
 

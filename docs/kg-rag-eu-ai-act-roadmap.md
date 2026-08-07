@@ -2,7 +2,7 @@
 
 **Project:** Hybrid Knowledge Graph + Vector RAG over the EU AI Act and GDPR, built entirely on the Cohere model stack.
 
-**Why this project:** Almost every candidate has built vector RAG. Very few have built retrieval that answers questions requiring two or three hops across related entities — and almost nobody has done it over a regulated-industry corpus using the enterprise stack Cohere actually sells. This project targets FDE roles: it demonstrates retrieval architecture, evaluation discipline, cost awareness, and domain framing (sovereign AI / EU compliance) in one repository.
+**Why this project:** Vector RAG over a document corpus is well-trodden. Retrieval that answers questions requiring two or three hops across related entities is not — and it is rarer still over a regulated-industry corpus using the enterprise stack Cohere actually sells. What the repository therefore holds in one place: retrieval architecture, evaluation discipline, cost accounting, and domain modelling (sovereign AI / EU compliance).
 
 **Target build time:** 3–4 weeks part-time (10–12 h/week).
 
@@ -20,7 +20,7 @@ Legal texts are graphs pretending to be documents. Article 26 of the AI Act impo
 
 - Cohere API key. Trial key for development (rate-limited, ~1,000 calls/month); production key before running the full extraction pass.
 - Neo4j: Aura Free (cloud, ~200k node / 400k relationship cap — sufficient) **or** Docker locally. Recommendation: Docker for development, so everything runs from one `docker-compose.yml`.
-- PostgreSQL 16 + pgvector: Docker locally. Optional stretch: Azure Database for PostgreSQL Flexible Server provisioned via Terraform (a strong extra signal given your IaC background — one small `/infra` folder in the repo).
+- PostgreSQL 16 + pgvector: Docker locally. Optional stretch: Azure Database for PostgreSQL Flexible Server provisioned via Terraform — a managed alternative to the local Docker Postgres, provisioned from one small `/infra` folder in the repo.
 
 **Local stack**
 
@@ -44,7 +44,7 @@ Legal texts are graphs pretending to be documents. Article 26 of the AI Act impo
 
 ## 3. The Cohere model mapping
 
-Every model call in the system is a Cohere model. This is deliberate: it turns the repo into a demonstration that you know their product surface end to end.
+Every model call in the system is a Cohere model. This is deliberate: one vendor means one cost model, and it makes the layers of the stack directly comparable against each other.
 
 | Pipeline stage | Model | Why |
 |---|---|---|
@@ -214,7 +214,7 @@ class Extraction(BaseModel):
    - `definition_of(term)` — term → defining article + text
    - `cross_regulation(article)` — INTERACTS_WITH neighborhood
    - `path_between(entity_a, entity_b)` — bounded shortest path (≤4 hops)
-   The model chooses the template and fills parameters; the query itself is fixed. This is a security control (no injection into your DB), a reproducibility control, and an interview talking point.
+   The model chooses the template and fills parameters; the query itself is fixed. This is both a security control (no injection into your DB) and a reproducibility control.
 
 ### Phase 4 — Merged grounded answers (~week 3, second half)
 
@@ -254,30 +254,18 @@ kg-rag-eu-ai-act/
 └── docs/                   # this roadmap, ADRs, RCA-style failure notes
 ```
 
-Write 3–4 short ADRs (you already do this on Maestro): "Why hybrid over graph-only", "Why templates over generated Cypher", "Why paragraph-level chunking", "Embedding dimension choice". FDE reviewers love decision records more than code.
+Write 3–4 short ADRs: "Why hybrid over graph-only", "Why templates over generated Cypher", "Why paragraph-level chunking", "Embedding dimension choice". These record the part of the design the code cannot express — a module shows what was built, not which alternatives were weighed or why they lost.
 
 ---
 
-## 8. Resume line and interview framing
-
-**Resume line (fill the numbers after Phase 5):**
-> Built a hybrid knowledge-graph + vector RAG system over EU AI Act and GDPR (~N chunks, Neo4j + pgvector) on the Cohere stack (Command A, Embed v4, Rerank 3.5); raised multi-hop question accuracy from X% to Y% over a reranked vector baseline at Z ms p95, with natively grounded citations validated server-side.
-
-**Interview angles this project hands you:**
-- *"Where do embeddings fail?"* — you have a measured answer with a curve, not an opinion.
-- *"How do you prevent hallucinated citations?"* — grounded generation + server-side validation + a measured rejection rate.
-- *"How do you control LLM access to a database?"* — template library, parameterized only.
-- *"Why Cohere?"* (in a Cohere loop) — you used every layer of their stack and can compare Embed v4 dimensions and R7B-vs-A routing economics from your own logs.
-- Sovereign AI narrative: an EU-regulation compliance assistant is precisely the workload European enterprises want on sovereign infrastructure — connects directly to your confidential computing / digital sovereignty SME background.
-
-## 9. The four failure modes (from the guide, localized)
+## 8. The four failure modes (from the guide, localized)
 
 1. **Open-ended ontology** → unqueryable graph. Mitigated: fixed 8/10 type sets, enforced by Pydantic `Literal` types.
 2. **Skipped entity resolution** → "deployer" exists as four nodes and every multi-hop query silently fails. Mitigated: dedicated resolution stage with a tuned threshold and alias lists.
 3. **Model-generated raw Cypher** → injection risk + unreproducible. Mitigated: template library.
 4. **Corpus without relationships** → already solved: legal cross-references are the densest relationship structure available in free public text.
 
-## 10. Stretch goals (only after Phase 5 ships)
+## 9. Stretch goals (only after Phase 5 ships)
 
 - **Multilingual demo:** ingest the official German version, ask questions in German, retrieve across both — a one-day add showcasing Embed v4's multilingual strength and doubling the sovereign-AI story.
 - Incremental ingestion (re-extract only changed chunks via the hash cache) instead of full re-runs.
@@ -287,13 +275,13 @@ Write 3–4 short ADRs (you already do this on Maestro): "Why hybrid over graph-
 
 ---
 
-## 11. Week-by-week schedule (10–12 h/week)
+## 10. Week-by-week schedule (10–12 h/week)
 
 | Week | Focus | Exit criterion |
 |---|---|---|
 | 1 | Corpus download + parser + chunker; ontology finalized; **eval questions drafted**; extraction schema + cost estimate on 10 chunks | Structured JSON of both regulations; cost math done |
 | 2 | Full extraction run; entity resolution; Neo4j populated; embeddings + pgvector + recall measurement | Connected graph, measured recall@10 |
 | 3 | Router, entity linking, Cypher templates; path-to-prose, grounded generation, citation validator | End-to-end `/ask` works on all routes |
-| 4 | Three-way benchmark, judge + agreement check, README, demo video, failure notes | Repo public, video recorded |
+| 4 | Three-way benchmark, judge + agreement check, README, demo video, failure notes | Three-way benchmark published with failure notes |
 
-Phase 1 always takes twice the estimate. That is normal; budget for it and do not skip entity resolution to catch up — it is the phase interviewers ask about.
+Phase 1 always takes twice the estimate. That is normal; budget for it and do not skip entity resolution to catch up — it is the phase everything downstream rests on, and skipping it breaks every multi-hop query silently.
