@@ -113,8 +113,22 @@ A change is marked `DONE` only if code in this repo enforces it.
   and 1.00× on `graph`** — the route that never enters the vector path, which is what identifies the
   gap as the skipped embed+rerank round trip rather than drift. Route agreement with the gold labels
   is **22 of 23**, the miss being ADR-0012's recorded `th-004`. See `docs/metrics/answer-path.md`.
-- LLM-judge agreement against a hand-verified 20% sample: _TBD_ (roadmap §5.3; `eval/judge.py` is a stub)
-- Benchmark surprises (where the expected accuracy curve did not materialize): _TBD_
+- LLM-judge agreement against a hand-verified 20% sample: **17 of 20 = 85%** (2026-08-16).
+  Holdout chosen by `judge.holdout()` from the eval set alone before any answer existed;
+  graded blind via `eval/grade_holdout.py`, which withholds every judgement field.
+  The three disagreements do **not** share a direction (1 lenient, 2 harsh), which is what
+  rules out "the grading rules were too strict" as the explanation for the benchmark's null.
+  The hand pass also found a defect in the agreement harness itself — see
+  `docs/metrics/benchmark.md` §Judge agreement.
+- Benchmark surprises (where the expected accuracy curve did not materialize): **the curve
+  did not materialize at all.** The hybrid lost to both vector baselines, on the common
+  89-row denominator (31/89 vs 35/89 vs 37/89), while being the slowest and most expensive
+  system. Full narrative in `docs/metrics/benchmark.md` §Why the hybrid lost; the short
+  version is that ~45% of every arm's answers are `partially_correct` — legally incomplete
+  rather than unfounded — and graph retrieval does not fix incompleteness. Two confounds are
+  named and unresolved there: the hybrid ran on a budget retaining 20 of 61 reachable gold
+  chunks, and the aggregation stratum's truncations fall hardest on the arms that retrieved
+  most.
 
 ## Recurrence tracker
 

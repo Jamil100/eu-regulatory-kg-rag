@@ -278,3 +278,57 @@ source, report the cross-path overlap, collapse nothing.
 - **The `<co>` characterisation is a correlation over 5 arms × 23 rows plus 4
   hand probes.** Monotony tracks it and count does not; that is not the same as
   having isolated the cause.
+
+---
+
+## Amendment, 2026-08-16 — re-measured at 100 rows, and the trade is now priced
+
+**Status of the decision: unchanged. Status of the evidence for it: weaker, and
+now the leading suspect in a negative benchmark.**
+
+Re-measured by `python -m src.answer.answer_path --prereg` over 52 routed rows
+(151 gold chunks), against the 10 routed rows (35 gold) this ADR was decided on:
+
+| arm, gold retained at N=50 | 23 rows | **100 rows** |
+|---|---|---|
+| `uncapped` | 25 of 35 | **61 of 151** |
+| `anchor` | 10 | **26** |
+| **`first` (adopted)** | 8 | **20** |
+| `roundrobin` | 4 | **17** |
+
+Two things changed and one did not.
+
+**`anchor` now beats `first` outside the resolution.** The gap was +2 at N=50 and
++1 at N=100 — at or inside ADR-0004's ±2-chunk resolution, which is why this ADR
+concluded "anchor did not earn the adoption". It is now **+6 at both N**, outside
+the resolution at both. `test_anchor_now_beats_the_adopted_constant_outside_the_resolution`
+records the inversion.
+
+**The budget bites far harder than it did.** 33 of 52 routed rows now carry more
+than 50 statements; at 23 rows, none of 10 did. The graph path emits a mean of 233
+statements per routed row and a maximum of 670, against 12,121 in total.
+
+**The adoption rationale is untouched.** `first` was adopted because it was the
+only arm that produced a scored answer on every row — `anchor` and `uncapped` ran
+to `MAX_TOKENS` on `th-001`. A budget that retains more gold and then truncates
+the answer retains nothing. Nothing re-measured here contradicts that.
+
+### Why this now matters more than it did
+
+The Phase 5 benchmark (`docs/metrics/benchmark.md`) returned a **negative result**:
+the hybrid lost to both vector baselines. The `hybrid-oracle` arm rules the router
+out as the cause (its cost is −1 answer over 93 rows). This ADR's constant is the
+next suspect on the list, because the hybrid entered that benchmark **retaining 20
+of the 61 gold chunks its own graph path had already found**.
+
+That is not a claim that `first-50` caused the null — the benchmark's own diagnosis
+is that ~45% of answers are `partially_correct` for every arm including the pure
+vector ones, which no graph budget can explain. But it is the one confound that can
+be settled cheaply: **re-run the `hybrid` arm at `uncapped` and see whether anything
+moves.** One arm, about $1. It is listed as the highest-value follow-up in
+`benchmark.md` §Open.
+
+Re-running the five-arm budget comparison at 100 rows would also settle whether
+`anchor` still truncates, which is the only reason it lost. Neither was done here,
+because doing it after seeing the benchmark's result — rather than before — is how
+a post-hoc budget change gets mistaken for a finding.
