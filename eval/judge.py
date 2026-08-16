@@ -519,10 +519,28 @@ def main() -> int:
     rows = load_artifact()
     # The hybrid arm is what the hand sample was graded against; grading the
     # holdout once per system would make "agreement" ambiguous.
+    #
+    # `mode == "replay"` IS LOAD-BEARING AND ITS ABSENCE WAS A REAL DEFECT.
+    #
+    # The live pass re-answers a 30-row subsample, so a row in that subsample has
+    # TWO hybrid verdicts in the artifact -- one per answer. `grade_holdout`
+    # filters to `replay`, so the hand labels describe the replayed answers; this
+    # comprehension did not, so the later live row silently overwrote the replay
+    # verdict and the agreement figure compared a hand grade of one answer against
+    # a machine grade of a different one.
+    #
+    # Found on the first real run: `oos-001` was the only holdout row in the live
+    # sample, its replay answer was graded `wrong` and its live answer
+    # `correct_refusal`, and the mismatch surfaced as a fake disagreement that
+    # looked like the judge excusing a safety-critical failure. The judge had in
+    # fact graded it correctly. One row of 20 is 5 percentage points of a figure
+    # whose whole job is to be trusted.
     judged = {
         row["id"]: row["verdict"]
         for row in rows
-        if row.get("system") == "hybrid" and row.get("verdict")
+        if row.get("system") == "hybrid"
+        and row.get("mode") == "replay"
+        and row.get("verdict")
     }
     if not judged:
         raise SystemExit(

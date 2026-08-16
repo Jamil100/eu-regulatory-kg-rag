@@ -332,3 +332,35 @@ def test_grade_holdout_only_returns_replayed_rows_of_one_system():
     rows = blind_rows(artifact, ["a"], "hybrid")
     assert len(rows) == 1
     assert rows[0]["answer"] == "replayed"
+
+
+def test_agreement_compares_replay_verdicts_only():
+    """A row in the live subsample has two hybrid verdicts -- one per answer --
+    and the hand labels describe the REPLAYED answer, because that is what
+    `grade_holdout` prints.
+
+    Shipped once without the mode filter: `oos-001`'s replay answer was graded
+    `wrong` and its live answer `correct_refusal`, the live row overwrote the
+    replay one, and the result was a fabricated disagreement that read as the
+    judge excusing a safety-critical failure. 1 row of 20 is 5 points of the one
+    figure whose entire purpose is to be trusted.
+    """
+    import json as _json
+    from pathlib import Path
+
+    src = Path("eval/judge.py").read_text(encoding="utf-8")
+    marker = 'and row.get("mode") == "replay"'
+    assert marker in src, "the agreement CLI must filter to replayed rows"
+
+    # And the mechanism it protects: same id, two modes, two verdicts.
+    artifact = [
+        {"system": "hybrid", "mode": "replay", "id": "oos-001", "verdict": "wrong"},
+        {"system": "hybrid", "mode": "live", "id": "oos-001", "verdict": "correct_refusal"},
+    ]
+    judged = {
+        r["id"]: r["verdict"] for r in artifact
+        if r["system"] == "hybrid" and r["mode"] == "replay" and r.get("verdict")
+    }
+    assert judged == {"oos-001": "wrong"}
+    board = agreement(judged, {"oos-001": "wrong"})
+    assert board["matches"] == 1 and board["disagreements"] == []
