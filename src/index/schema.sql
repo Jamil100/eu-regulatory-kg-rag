@@ -63,3 +63,16 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_regulation ON chunks (regulation);
 CREATE INDEX IF NOT EXISTS chunks_shape ON chunks (shape);
 CREATE INDEX IF NOT EXISTS chunks_entity_ids ON chunks USING gin (entity_ids);
+
+-- The enumeration path's access pattern: every paragraph of one article, in
+-- order. Added 2026-08-16 with `retrieve_by_article`; before it, `article` and
+-- `paragraph` were columns with no index and the lookup was a seq scan.
+--
+-- At 1,108 rows the scan costs a few milliseconds and this index buys almost
+-- nothing measurable -- it is here because the query is a locator lookup by
+-- primary structure, which is the one access pattern that should never depend
+-- on corpus size, not because a benchmark asked for it. The composite order
+-- (regulation, article, paragraph) matches both the WHERE and the ORDER BY, so
+-- the sort is free as well.
+CREATE INDEX IF NOT EXISTS chunks_article ON chunks (regulation, article, paragraph);
+CREATE INDEX IF NOT EXISTS chunks_annex ON chunks (regulation, annex, section, point);
