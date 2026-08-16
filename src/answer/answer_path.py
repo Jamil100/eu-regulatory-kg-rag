@@ -89,15 +89,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ARTIFACT",
-    "PREREG_KEY",
     "PASSAGE_TOP_N",
+    "PREREG_KEY",
     "AnswerPathError",
-    "NoContextError",
     "AnswerResult",
+    "NoContextError",
     "answer",
-    "sweep",
     "preregister",
     "scoreboard",
+    "sweep",
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -118,6 +118,39 @@ PREREG_KEY = "_prereg"
 # arrive already ranked by something with a scale, and `POST[5] = 27 of 51` is
 # the measured citable ceiling they carry (`tests/test_reranker.py:48`).
 PASSAGE_TOP_N = 5
+
+# How deep the live vector branch takes each lexical list before unioning it into
+# the reranker's candidate pool. `0` disables the union and uses the
+# vector-top-50-only pool every number before 2026-08-16 was measured on.
+#
+# This is a live-path constant and is deliberately NOT the same name as
+# `lexical.LEXICAL_DEPTH`, which the offline sweep uses. The sweep must be free
+# to measure a depth the request path is not shipping -- that is the whole point
+# of sweeping it -- and one shared constant would make adopting a measurement and
+# taking a measurement the same edit.
+#
+# SET TO 0: MEASURED, NOT SHIPPED. The union works and does what it was built to
+# do -- gold in the candidate pool goes 157/203 -> 176/203, the largest single
+# retrieval gain measured on this corpus. It is off anyway, because almost none
+# of that gain survives the ranking stage:
+#
+#   gold in pool        157 -> 176   (+19)
+#   gold in the prompt  100 -> 102   (+2, 2 wins / 0 losses / 88 ties, p=0.500)
+#
+# The loss decomposition says where the other 17 went: retrieval loss falls
+# 46 -> 27 exactly as intended, and ordering loss RISES 51 -> 66. Widening the
+# pool moved gold from a stage that could not reach it to a stage that ranks it
+# below noise, which is the bottleneck `tests/test_reranker.py:LOSS` already
+# pins. Paying 2.0x rerank billing ($0.0020 -> $0.0040/query, 66% of pools cross
+# Cohere's 100-document search unit) and ~240 ms for +2 chunks is not a trade
+# worth making while that is true.
+#
+# Everything needed to flip this back is committed: `lexical.py`, the `pool` /
+# `pool_reranked` columns in `eval/rerank-eval.jsonl`, and the `rerank-pool` arm
+# in `eval/run_benchmark.py`. Revisit the moment the ranking stage changes --
+# a better reranker or a different chunking makes the +19 reachable, and then
+# this constant is the whole of the adoption.
+LEXICAL_DEPTH_LIVE = 0
 
 # The Ns the pre-registration reports `first` retention at. The budget question
 # is a curve, not a point, and publishing one number would make N look like a
@@ -269,7 +302,7 @@ def answer(
     if budget not in BUDGETS:
         raise AnswerPathError(f"{budget!r} is not a budget arm; have {sorted(BUDGETS)}")
 
-    from src.query.router import RouterError, route_by_rules
+    from src.query.router import route_by_rules
 
     started = time.perf_counter()
     if route is None:
@@ -301,12 +334,13 @@ def answer(
     vector_ms = 0.0
     if route in ("vector", "both") and passages is None:
         from src.query.reranker import CANDIDATES, RerankError, rerank_detailed
-        from src.query.retriever import DIM, RetrieverError, retrieve_detailed
+        from src.query.retriever import DIM, RetrieverError, retrieve_pool_detailed
 
         started = time.perf_counter()
         try:
-            retrieved = retrieve_detailed(
-                question, CANDIDATES, dim=DIM, conn=conn, client=client
+            retrieved = retrieve_pool_detailed(
+                question, CANDIDATES, dim=DIM, conn=conn, client=client,
+                lexical_depth=LEXICAL_DEPTH_LIVE,
             )
             reranked = rerank_detailed(
                 question, retrieved.docs, top_n=PASSAGE_TOP_N, client=client
@@ -615,6 +649,11 @@ def preregister(
 PASSAGE_FIELDS: dict[str, str] = {
     "reranked": "rerank_scores",
     "retrieved": "retrieved_scores",
+    # The lexical-union arm: the same cross-encoder over a pool widened by BM25
+    # and Postgres FTS. Pairs with `pool_rerank_scores` for the same reason the
+    # two above pair with theirs -- attaching the wrong score column would
+    # silently mislabel which arm produced a passage.
+    "pool_reranked": "pool_rerank_scores",
 }
 
 
@@ -1182,7 +1221,7 @@ def _report(board: dict[str, Any]) -> int:
         print(f"  {arm}")
         for rid, cell in sorted(rows.items()):
             want = "cite a retrieved chunk" if cell["must_cite"] else "decline, zero citations"
-            print(f"    {rid:9} {cell['stratum']:<14} must_cite={str(cell['must_cite']):<5} "
+            print(f"    {rid:9} {cell['stratum']:<14} must_cite={cell['must_cite']!s:<5} "
                   f"citations={cell['citations']:<3} gold_cited={len(cell['gold_cited'])}  "
                   f"want: {want}")
     print(
