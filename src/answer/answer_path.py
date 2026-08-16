@@ -596,18 +596,43 @@ def preregister(
 # The sweep -- impure, needs a key, one arm per invocation
 # --------------------------------------------------------------------------
 
-def replayed_passages(conn: Connection | None = None) -> dict[str, list[ContextDoc]]:
-    """The reranked top-5 per question, replayed from `eval/rerank-eval.jsonl`.
+# The two committed orderings in `rerank-eval.jsonl`, and the score column that
+# belongs to each. `retrieved` is the raw HNSW draw over `CANDIDATES`; `reranked`
+# is that draw reordered by the cross-encoder. Pairing an ordering with the wrong
+# score column would silently attach rerank relevance scores to a vector-only
+# arm, which is the exact comparison Phase 5 exists to make.
+PASSAGE_FIELDS: dict[str, str] = {
+    "reranked": "rerank_scores",
+    "retrieved": "retrieved_scores",
+}
+
+
+def replayed_passages(
+    conn: Connection | None = None, field: str = "reranked"
+) -> dict[str, list[ContextDoc]]:
+    """The top-5 per question, replayed from `eval/rerank-eval.jsonl`.
 
     Zero API calls: the ordering is committed and the text comes out of Postgres
     by `chunk_id`. Every arm therefore sees identical passages, so a difference
     between two arms is a difference in the graph budget and cannot be a
     different vector draw. Same reasoning as `retrieve_detailed(vector=...)`.
+
+    `field` selects WHICH committed ordering to replay, and it is what lets Phase
+    5 run a vector-only baseline for $0.00. The artifact stores the raw HNSW draw
+    (`retrieved`) beside the cross-encoder reordering (`reranked`), so the
+    with-rerank and without-rerank systems can both be assembled from one
+    committed sweep rather than from two live ones. Without this parameter
+    "vector-only, no reranker" is not reachable from any entry point in the repo:
+    `answer()` hardwires retrieve->rerank in its vector branch.
     """
+    if field not in PASSAGE_FIELDS:
+        raise AnswerPathError(f"{field!r} is not a committed ordering; have {sorted(PASSAGE_FIELDS)}")
+    score_field = PASSAGE_FIELDS[field]
+
     from src.query.reranker import load_artifact
 
     rows = load_artifact()
-    wanted = sorted({cid for row in rows for cid in row["reranked"][:PASSAGE_TOP_N]})
+    wanted = sorted({cid for row in rows for cid in row[field][:PASSAGE_TOP_N]})
 
     owned = conn is None
     if conn is None:
@@ -627,7 +652,8 @@ def replayed_passages(conn: Connection | None = None) -> dict[str, list[ContextD
     out: dict[str, list[ContextDoc]] = {}
     for row in rows:
         docs: list[ContextDoc] = []
-        for rank, chunk_id in enumerate(row["reranked"][:PASSAGE_TOP_N]):
+        scores = row.get(score_field) or []
+        for rank, chunk_id in enumerate(row[field][:PASSAGE_TOP_N]):
             if chunk_id not in by_chunk:
                 continue
             text, label = by_chunk[chunk_id]
@@ -637,7 +663,7 @@ def replayed_passages(conn: Connection | None = None) -> dict[str, list[ContextD
                     text=text,
                     citation_label=label,
                     source="PASSAGE",
-                    score=row["rerank_scores"][rank] if rank < len(row["rerank_scores"]) else None,
+                    score=scores[rank] if rank < len(scores) else None,
                 )
             )
         out[row["id"]] = docs
