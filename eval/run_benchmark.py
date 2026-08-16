@@ -116,10 +116,38 @@ SYSTEMS: dict[str, dict[str, Any]] = {
     "rerank-enum": {"field": "reranked", "route": "vector", "reranks": True,
                     "enumerates": True,
                     "label": "Vector + Rerank 3.5 + enumeration"},
+    # THE CONTROL, AND IT IS NOT OPTIONAL. `ag-006` fails because its ranked
+    # top-5 contains Art. 100 -- fines for Union institutions, EUR 1.5M and
+    # 750k -- which the answer reports as AI Act fine tiers. Both remedies on the
+    # table remove Art. 100 from the prompt: decomposing per enumerated paragraph
+    # never reads it, and so does simply not augmenting with the ranked passages.
+    # Without this arm the two are confounded and a win would be attributed to
+    # the expensive one.
+    "rerank-enum-only": {"field": "reranked", "route": "vector", "reranks": True,
+                         "enumerates": True, "enum_only": True,
+                         "label": "Enumeration alone, single pass"},
+    # `rerank-enum-only` with the single generation pass replaced by one
+    # extraction per enumerated paragraph plus deterministic assembly. Identical
+    # passages to the arm above -- the pair isolates synthesis and nothing else.
+    # N calls where there was 1, so it is measured to be kept or deleted.
+    # The rejected wider detector, wired so its cost can be measured end to end
+    # rather than inferred from recall. It reaches 8 of 10 aggregation rows and
+    # fires on 5 non-aggregation rows that the adopted detector leaves alone --
+    # and this pipeline has twice shown that added context flips correct answers,
+    # so the FP rows have to be graded, not counted.
+    "rerank-enum-wide": {"field": "reranked", "route": "vector", "reranks": True,
+                         "enumerates": True, "enum_only": True,
+                         "wide_detector": True,
+                         "label": "Enumeration, wide detector"},
+    "rerank-enum-decomposed": {"field": "reranked", "route": "vector",
+                               "reranks": True, "enumerates": True,
+                               "enum_only": True, "decomposes": True,
+                               "label": "Enumeration alone, decomposed synthesis"},
 }
 
-SYSTEM_ORDER = ("vector", "rerank", "rerank-pool", "rerank-enum", "hybrid",
-                "hybrid-oracle")
+SYSTEM_ORDER = ("vector", "rerank", "rerank-pool", "rerank-enum",
+                "rerank-enum-only", "rerank-enum-wide",
+                "rerank-enum-decomposed", "hybrid", "hybrid-oracle")
 
 # THE FOURTH ARM EXISTS BECAUSE THE ROUTER AND THE HYBRID ARE TWO DIFFERENT
 # THINGS AND ONE NUMBER CANNOT MEASURE BOTH.
@@ -209,6 +237,42 @@ def bucket_of(row: dict) -> str | None:
 # The sweep -- impure. Needs containers, and a key for the generation half.
 # --------------------------------------------------------------------------
 
+def _decomposed_result(question: str, docs: list, route: str, client: Any | None):
+    """Run decomposed synthesis and shape it like an `AnswerResult`.
+
+    The adapter lives here rather than in `src/answer/decompose.py` so that
+    module stays a synthesis primitive with no dependency on the answer path or
+    on the benchmark's record shape.
+
+    THE VALIDATION FIELDS ARE ZERO BY CONSTRUCTION, NOT BY OMISSION. Every
+    citation is built from a document that was passed in, with a span computed
+    from the answer string this code just wrote, so `rejected`, `uncited` and
+    `span_mismatches` cannot be non-empty. Filling them with 0 is the honest
+    value; leaving them absent would make this arm look unmeasured on the three
+    checks the other arms report.
+    """
+    from src.answer.answer_path import AnswerResult
+    from src.answer.decompose import decomposed_answer
+
+    got = decomposed_answer(question, docs, client=client)
+    return AnswerResult(
+        answer=got.answer,
+        citations=got.citations,
+        route=route,
+        documents_sent=len(docs),
+        graph_sent=0,
+        passage_sent=len(docs),
+        finish_reason="COMPLETE",
+        attempts=got.calls,
+        cost_usd=got.cost_usd,
+        # `latency_ms` is a computed property over the phase timers. All of this
+        # arm's wall clock is synthesis, so it goes in `generate_ms` -- putting it
+        # anywhere else would misattribute N extraction calls to retrieval.
+        generate_ms=got.latency_ms,
+        dropped=got.dropped,
+    )
+
+
 def sweep(
     rows: list[dict],
     system: str,
@@ -287,6 +351,12 @@ def sweep(
         conn = pg_connect()
 
     passages = {} if live else replayed_passages(conn, field=spec["field"])
+    # Which rows the enumeration detector fired on. Decomposed synthesis is
+    # scoped to exactly these: it is a remedy for reading many limbs of one
+    # provision, and applying it to an ordinary ranked top-5 is a different
+    # intervention that nothing has measured. Scoping it by `spec["decomposes"]`
+    # alone silently did that to 6 of the 10 aggregation rows.
+    enumerated_rows: set[str] = set()
 
     # THE ENUMERATION ARM IS BUILT HERE RATHER THAN INSIDE `answer()`, because
     # this is a REPLAY: `passages=` short-circuits the vector branch entirely, so
@@ -295,18 +365,54 @@ def sweep(
     # request would have assembled, from the same committed ordering, with no
     # retrieval and no spend.
     if not live and spec.get("enumerates"):
-        from src.answer.answer_path import ENUM_VOTE_N, _with_enumeration
-        from src.query.router import _ENUMERATE_PROVISION, enumeration_target
+        from src.answer.answer_path import (
+            ENUM_VOTE_N,
+            _vote_target,
+            _with_enumeration,
+        )
+        from src.query.retriever import enumerate_provision
+        from src.query.router import (
+            _ENUMERATE_PROVISION,
+            _ENUMERATE_PROVISION_WIDE,
+            enumeration_target,
+        )
+
+        detector = (
+            _ENUMERATE_PROVISION_WIDE if spec.get("wide_detector")
+            else _ENUMERATE_PROVISION
+        )
 
         votes = replayed_passages(conn, field=spec["field"], top_n=ENUM_VOTE_N)
         by_id = {r["id"]: r for r in rows}
         for qid, docs in list(passages.items()):
             question = (by_id.get(qid) or {}).get("question")
-            if not question or not _ENUMERATE_PROVISION.search(question):
+            if not question or not detector.search(question):
                 continue
-            passages[qid] = _with_enumeration(
+            enumerated_rows.add(qid)
+            built = _with_enumeration(
                 docs, votes.get(qid, docs), enumeration_target(question), conn=conn
             )
+            if spec.get("enum_only"):
+                # The enumerated provision alone -- recomputed rather than
+                # recovered by set-differencing `built` against the ranked list.
+                # The difference would drop any paragraph that appears in BOTH,
+                # and on `ag-006` that is `aia-art99-para3` and `aia-art99-para7`
+                # -- two of the four gold chunks, silently removed by the arm
+                # built to keep them.
+                target = enumeration_target(question) or _vote_target(
+                    votes.get(qid, docs)
+                )
+                enumerated = (
+                    enumerate_provision(target[0], conn=conn, **target[1])
+                    if target else []
+                )
+                # Enumeration refused (over MAX_ENUMERATION, or no such
+                # provision): fall back to the ranked list rather than to an
+                # empty prompt. That row then measures `rerank`, which is the
+                # honest degradation.
+                passages[qid] = enumerated or docs
+            else:
+                passages[qid] = built
 
     if only_strata:
         rows = [r for r in rows if r["stratum"] in only_strata]
@@ -327,17 +433,24 @@ def sweep(
                 "bucket": bucket_of(row),
             }
             try:
-                result = answer(
-                    row["question"],
-                    route=(row["route"] if spec["route"] == "gold" else spec["route"]),
-                    driver=driver,
-                    conn=conn,
-                    client=client,
-                    passages=(
-                        live_passages(row["question"]) if live
-                        else passages.get(row["id"])
-                    ),
+                row_passages = (
+                    live_passages(row["question"]) if live
+                    else passages.get(row["id"])
                 )
+                if (spec.get("decomposes") and row_passages
+                        and row["id"] in enumerated_rows):
+                    result = _decomposed_result(
+                        row["question"], row_passages, spec["route"], client
+                    )
+                else:
+                    result = answer(
+                        row["question"],
+                        route=(row["route"] if spec["route"] == "gold" else spec["route"]),
+                        driver=driver,
+                        conn=conn,
+                        client=client,
+                        passages=row_passages,
+                    )
             except (AnswerPathError, GenerateError) as exc:
                 # The system under measurement must not take the sweep down with
                 # it; the failure is recorded as this row's result. Same call

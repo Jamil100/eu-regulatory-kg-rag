@@ -282,6 +282,14 @@ def test_every_system_in_the_table_is_one_the_roadmap_names_or_a_marked_ceiling(
         # here for the same reason as `rerank-pool`: it is deployable, so it must
         # not be exempt from the checks the other deployable arms get.
         "rerank-enum",
+        # Added 2026-08-16 as the CONTROL for decomposed synthesis and the two
+        # variants it separates. `-only` is enumeration without the ranked
+        # passages, `-wide` is the rejected wider detector, `-decomposed` is one
+        # extraction per enumerated paragraph. None is adopted; all three are
+        # named so their measurements stay reproducible from the artifact.
+        "rerank-enum-only",
+        "rerank-enum-wide",
+        "rerank-enum-decomposed",
     }
     assert SYSTEMS["vector"]["field"] == "retrieved", "vector-only replays the pre-rerank draw"
     assert SYSTEMS["rerank"]["field"] == "reranked"
