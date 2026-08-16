@@ -20,8 +20,12 @@ chunks at p = 0.500. Six levers, none of which moves the ranking stage. **The
 seventh does not try to: deterministic enumeration reads a whole provision in
 statutory order on the questions that ask for one, and takes aggregation gold in
 the prompt from 12/48 to 33/48** — at 1.2% false positives on the other 80 rows
-and no change to any route. End to end it is 1 win / 0 losses against `rerank`
-over 10 rows, which is directional and not resolvable at that size. The
+and no change to any route. End to end, **enumerating the provision ALONE takes
+aggregation from 2/10 to 4/10, 2 wins and 0 losses, at lower cost and latency
+than the arm it replaces**; `ag-006` turned out to fail because Article 100 was
+in its ranked top-5, not because synthesis confused Article 99's paragraphs.
+Decomposed synthesis was built for that row, is 2.0x cost for zero verified
+rows, and is not adopted. The
 graph path now runs end to end: deterministic template selection reaches **24 of
 32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
 and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
@@ -827,6 +831,95 @@ generation — but it is a different problem, and the accuracy column will not m
 until it is addressed. `MAX_TOKENS` at 2000 is not the constraint: **0
 truncations** across all 30 enumeration generations, on prompts up to 15 passages.
 
+#### Synthesis on enumerated provisions: the premise was wrong, and the control won
+
+This session set out to fix `ag-006` with decomposed synthesis -- one extraction
+call per enumerated paragraph, then deterministic assembly -- on the theory that
+a single pass over twelve near-identical paragraphs cannot keep twelve
+(subject, value) pairs straight. **The theory was wrong about this row, and
+finding that out cost one control arm.**
+
+**`ag-006` was never a synthesis failure.** Its ranked top-5 is
+`[aia-art100-para3, aia-art99-para3, aia-art100-para2, aia-art99-para7,
+gdpr-art83-para2]`. **Article 100 is the fine schedule for Union institutions,
+bodies and agencies** -- EUR 1 500 000 and EUR 750 000 -- and those are exactly
+the two figures the failing answer reports as AI Act tiers. The model was not
+confusing Art. 99's paragraphs with each other; it was reading a neighbouring
+article that ranking had put in front of it and enumeration had left there,
+because enumeration *augments* the ranked passages rather than replacing them.
+
+So the arm that matters is the cheap one. Four arms, majority-of-3, paired, on
+the 10 aggregation rows:
+
+| arm | passes | new win | calls/row | $/fired row | latency/fired row |
+|---|---|---|---|---|---|
+| `rerank` | 2/10 | — | 1 | $0.0075 | 8.4 s |
+| `rerank-enum` (augment) | 3/10 | `ag-001` | 1 | $0.0106 | 8.8 s |
+| **`rerank-enum-only`** (provision alone) | **4/10** | **`ag-006`** | 1 | **$0.0066** | **5.8 s** |
+| `rerank-enum-decomposed` | 5/10 | `ag-008`* | **9.2** | $0.0130 | 20.5 s |
+
+Zero losses at every step. `rerank-enum-only` vs `rerank` is 2 wins / 0 losses,
+p = 0.500; vs `rerank-enum` it is 1 / 0.
+
+**Dropping the ranked passages is cheaper than keeping them and wins the row
+decomposition was built for.** It is also cheaper than the arm it replaces --
+fewer passages in the prompt than `rerank-enum`, and fewer than `rerank` on some
+rows -- so this is the first change in this file that improves accuracy and cost
+together. The trade is real, though: `enum-only` gives up the ranked passages'
+gold, which costs recall on `ag-004` (3 of 7 gold to 1 of 7) and `hn-008`. It
+still wins on verdicts, because on this stratum a contaminated prompt is worth
+less than a smaller clean one.
+
+**\* `ag-008`'s win is a judge failure and should not be counted.** The grading
+rule says omitting the Art. 6(2) high-risk consequence is *partial*. **None of the
+three decomposed answers contains the string "high-risk" at all**, and all three
+were graded `correct`; the identical omission under `enum-only` was graded
+`partially_correct` 3 times out of 3. One judge reason states the answer "omits
+the Art. 6(2) consequence which is treated as partial" and then returns
+`correct`; another asserts it "correctly identifies the Art. 6(2) consequence",
+which is false of the text. The plausible mechanism is format: the decomposed
+answer is longer, clause-per-citation and densely labelled, and the judge appears
+to reward that. **This is the first measured case of the judge being wrong in a
+direction that favours an arm under test**, and it is a caution for every
+comparison in this file, not only this one -- 85% agreement was measured on
+`rerank`-shaped prose and has never been re-measured on a different answer shape.
+
+**So decomposed synthesis buys zero verified rows for 2.0x cost and 3.5x
+latency** (9.2 calls per fired row, 5.8 s to 20.5 s). By the criterion this
+session set -- if it does not flip the row it was built for, drop it rather than
+tune it -- it is not adopted. It is kept in the tree, tested and measurable, and
+`rerank-enum-decomposed` names it in `run_benchmark.SYSTEMS`.
+
+What the extraction *did* demonstrate is that the per-paragraph pairings are
+correct when read in isolation: 35M/7% to Art. 5 prohibitions, 15M/3% to operator
+obligations, 7.5M/1% to misinformation, and the SME "whichever is lower"
+inversion. The mechanism works. The row did not need it.
+
+#### The wider detector, measured end to end: a wash with two casualties
+
+The rejected detector variant catches 8 of 10 aggregation rows against the
+adopted 4, at 6.2% false positives against 1.2%. Recall alone made it look like a
+trade worth revisiting once enumeration was cheap. Graded on 30 rows,
+majority-of-3, it is not:
+
+| stratum | incumbent | wide | wins | losses | p |
+|---|---|---|---|---|---|
+| single-hop | `rerank` 15/20 | 15/20 | `sh-019` | **`sh-010`** | 1.000 |
+| aggregation | `enum-only` 4/10 | 4/10 | `ag-003` | **`ag-002`** | 1.000 |
+
+**Net zero, and the two losses are the predicted failure mode**: rows that were
+correct, flipped by added context. `ag-002` is the instructive one. It asks
+"which of a deployer's obligations under Article 26 are **modified** when the
+deployer is a financial institution" -- a question about *part* of a provision.
+Enumerating all twelve paragraphs of Article 26 buries the two-sentence
+carve-out that is the entire answer, and the row goes from `correct` to
+`partially_correct` on all three runs.
+
+That is the sharp form of the rule this whole line of work has been circling:
+**enumeration is right when the question asks for all of a provision and wrong
+when it asks about a part of one**, and question shape alone does not reliably
+separate those. The adopted narrow detector stays.
+
 #### Why the end-to-end measurement was not run
 
 The obvious follow-up is a majority-of-3 A/B of the union arm through generation.
@@ -1181,14 +1274,36 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
   not touch. The next thing tried should be a different ranker, and if the eval
   set cannot resolve the difference it makes, that is a statement about the eval
   set.
-- **The aggregation stratum's constraint has moved from retrieval to generation,
+- ~~**The aggregation stratum's constraint has moved from retrieval to generation,
   and nothing yet addresses the new one.** `ag-006` has all 4 gold paragraphs of
   Art. 99 in the prompt, cites all 4, and is `wrong` on all three runs because it
-  pairs the wrong ceiling with the wrong infringement class; `ag-008` has all 8
-  Annex III points and is `partially_correct` for omitting a consequence stated
-  in a different article. Neither is a retrieval defect. Synthesis over a
-  complete, correctly-ordered provision is the open problem, and it is the first
-  time in this file that sentence has been true.
+  pairs the wrong ceiling with the wrong infringement class.~~ → **Half right,
+  and the wrong half was the diagnosis (2026-08-16).** `ag-006` was not a
+  synthesis failure: its ranked top-5 carries **Article 100**, the fine schedule
+  for Union institutions, and the EUR 1.5M / 750k figures in the wrong answer are
+  copied from it. Dropping the ranked passages on enumerating rows
+  (`rerank-enum-only`) fixes the row at **lower** cost than the arm it replaces.
+  Decomposed synthesis was built for this row, did not turn out to be what fixed
+  it, and is not adopted. Aggregation is now 4/10 against `rerank`'s 2/10.
+- **`enum-only` beats `enum+top5`, which contradicts the augment-not-replace
+  finding, and both are right.** Augmenting wins on RECALL -- it cannot lose gold
+  the ranking already had, worth +4 gold chunks. Replacing wins on VERDICTS,
+  because the ranked tail is also how Article 100 gets into `ag-006`. Recall and
+  accuracy disagree here, and the accuracy measurement is the one that decides.
+  Any future use of the retrieval numbers in this file should carry that caveat:
+  gold-in-prompt is necessary and is not sufficient, and on this stratum more of
+  it can be worse.
+- **The judge has been caught grading in favour of an arm under test.** On
+  `ag-008`, three decomposed answers omit the Art. 6(2) consequence that the
+  grading rule calls partial -- none contains the string "high-risk" -- and all
+  three were graded `correct`, while the identical omission under `enum-only` was
+  graded partial 3 of 3. One reason states the disqualifying fact and passes the
+  row anyway; another asserts the opposite of the text. The 85%/95% agreement
+  figures were measured on `rerank`-shaped prose and have never been re-measured
+  on a different ANSWER SHAPE. Decomposed answers are longer and
+  citation-dense, which is the obvious candidate mechanism. Until that is
+  re-measured, a comparison between arms that produce differently-shaped answers
+  is weaker than one between arms that do not.
 - **The end-to-end enumeration result is unresolvable at n=10** — one row is 10pp
   on that denominator, against a ±5.2pp noise band. It is 1 win / 0 losses vs
   `rerank` and 3 / 0 vs `vector`, which is encouraging and is not evidence.
