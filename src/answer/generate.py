@@ -51,6 +51,8 @@ capped at what the statement's own text *showed*, never at the full 124. Citing
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -150,6 +152,13 @@ class GenerationResult:
 
     `dropped` names each citation this module refused to emit and why, so a
     silent zero and a silently-swallowed twelve look different in the artifact.
+
+    `request_sha` is the SHA-256 of the exact body sent to `client.chat`. It is
+    an instrument, not a control: nothing reads it at request time. It exists so
+    that "the same system returned different text on two runs" can be separated
+    into "the provider is nondeterministic" and "we sent a different request and
+    did not notice" -- which are the same observation until the payload is
+    hashed, and which have completely different fixes.
     """
 
     answer: str = ""
@@ -162,6 +171,7 @@ class GenerationResult:
     latency_ms: float = 0.0
     attempts: int = 1
     dropped: list[str] = field(default_factory=list)
+    request_sha: str = ""
 
 
 def get_client() -> Any:
@@ -196,7 +206,7 @@ def build_messages(question: str) -> list[dict[str, str]]:
 
 def _chat_call(
     client: Any, messages: list[dict], documents: list[dict]
-) -> tuple[Any, int]:
+) -> tuple[Any, int, str]:
     """The retrying unit, mirroring `template_selector._chat_call`.
 
     **This is the third new chat call site in three steps, and the first two both
@@ -219,6 +229,59 @@ def _chat_call(
 
     from src.index.embedder import RETRYABLE_ERRORS
 
+    # THE BODY IS BUILT ONCE AND IS BOTH HASHED AND SENT.
+    #
+    # `request_sha` exists to answer exactly one question, so it has to be beyond
+    # dispute: when two runs of the same system return different text, was the
+    # request the same? A hash taken over a *reconstruction* of the payload
+    # cannot answer that -- it would prove only that the reconstruction matched.
+    # So the dict below is the argument to `client.chat`, splatted at the call,
+    # and the hash is taken over that same object. There is no second copy that
+    # could drift from what went over the wire.
+    body: dict[str, Any] = dict(
+        model=settings.model_generate,
+        messages=messages,
+        documents=documents,
+        # Explicit, not defaulted. `citation_options.mode` defaults to
+        # "enabled" and Cohere may move what that resolves to; a default that
+        # changes upstream silently re-measures this whole step. Same reason
+        # `dim=512` is passed explicitly at every call site (retriever.py:20-24).
+        #
+        # `ENABLED`, NOT `ACCURATE` -- A CORRECTION TO THE PLAN, MADE BY THE
+        # API. The plan specified `{"mode": "ACCURATE"}`, which is in the SDK
+        # enum (`citation_options_mode.py` lists ENABLED/DISABLED/FAST/
+        # ACCURATE/OFF) and which `command-a-03-2025` rejects with a 400:
+        # *"This model does not support the provided citation mode:
+        # accurate."* ACCURATE/FAST are the v1 Command R `citation_quality`
+        # values; the enum is the union over every model and is not a
+        # contract with any one of them. Probed live 2026-08-05 -- FAST,
+        # ENABLED, OFF and DISABLED all succeed; ENABLED and FAST return
+        # citations, OFF and DISABLED return none. ENABLED is pinned because
+        # it is the model's full citation pass, which is what the plan was
+        # asking ACCURATE for.
+        citation_options={"mode": "ENABLED"},
+        temperature=0,
+        seed=42,
+        max_tokens=MAX_TOKENS,
+        # Deliberately absent:
+        #   response_format -- JSON mode lands citation spans on braces and
+        #     field names rather than on prose, which breaks `span_defects`.
+        #   safety_mode -- not configurable in combination with `documents`
+        #     (v2/client.py:271-277); passing it would be silently ignored.
+        #   thinking -- a second content block for no benefit here, and the
+        #     block-offset bug this module rebases around is exactly what it
+        #     would trigger.
+    )
+
+    # Canonical: sorted keys, no ASCII escaping, so the digest is a property of
+    # the payload rather than of dict ordering or of how json chose to escape a
+    # section sign. `default=str` is a backstop -- everything here is already
+    # JSON-native, and a future non-serialisable value should change the hash
+    # rather than raise inside an instrument.
+    request_sha = hashlib.sha256(
+        json.dumps(body, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
     @retry(
         retry=retry_if_exception_type(RETRYABLE_ERRORS),
         wait=wait_exponential_jitter(initial=2, max=60),
@@ -226,40 +289,7 @@ def _chat_call(
         reraise=True,
     )
     def _call() -> Any:
-        return client.chat(
-            model=settings.model_generate,
-            messages=messages,
-            documents=documents,
-            # Explicit, not defaulted. `citation_options.mode` defaults to
-            # "enabled" and Cohere may move what that resolves to; a default that
-            # changes upstream silently re-measures this whole step. Same reason
-            # `dim=512` is passed explicitly at every call site (retriever.py:20-24).
-            #
-            # `ENABLED`, NOT `ACCURATE` -- A CORRECTION TO THE PLAN, MADE BY THE
-            # API. The plan specified `{"mode": "ACCURATE"}`, which is in the SDK
-            # enum (`citation_options_mode.py` lists ENABLED/DISABLED/FAST/
-            # ACCURATE/OFF) and which `command-a-03-2025` rejects with a 400:
-            # *"This model does not support the provided citation mode:
-            # accurate."* ACCURATE/FAST are the v1 Command R `citation_quality`
-            # values; the enum is the union over every model and is not a
-            # contract with any one of them. Probed live 2026-08-05 -- FAST,
-            # ENABLED, OFF and DISABLED all succeed; ENABLED and FAST return
-            # citations, OFF and DISABLED return none. ENABLED is pinned because
-            # it is the model's full citation pass, which is what the plan was
-            # asking ACCURATE for.
-            citation_options={"mode": "ENABLED"},
-            temperature=0,
-            seed=42,
-            max_tokens=MAX_TOKENS,
-            # Deliberately absent:
-            #   response_format -- JSON mode lands citation spans on braces and
-            #     field names rather than on prose, which breaks `span_defects`.
-            #   safety_mode -- not configurable in combination with `documents`
-            #     (v2/client.py:271-277); passing it would be silently ignored.
-            #   thinking -- a second content block for no benefit here, and the
-            #     block-offset bug this module rebases around is exactly what it
-            #     would trigger.
-        )
+        return client.chat(**body)
 
     response = _call()
     # `_call.statistics`, NOT `_call.retry.statistics`. The two existing call
@@ -273,7 +303,7 @@ def _chat_call(
     # entry -- this is "verified once by hand, never encoded" again, one layer
     # further down: the retry policy *was* encoded, and the instrument that
     # reports whether it fired was not.
-    return response, int(_call.statistics.get("attempt_number", 1))
+    return response, int(_call.statistics.get("attempt_number", 1)), request_sha
 
 
 def _text_blocks(content: Any) -> tuple[str, dict[int, int], int]:
@@ -430,7 +460,7 @@ def generate_detailed(
     client = client or get_client()
     started = time.perf_counter()
     try:
-        response, attempts = _chat_call(
+        response, attempts, request_sha = _chat_call(
             client, messages or build_messages(question), documents
         )
     except ApiError as exc:
@@ -460,6 +490,7 @@ def generate_detailed(
         latency_ms=latency_ms,
         attempts=attempts,
         dropped=dropped,
+        request_sha=request_sha,
     )
 
 
