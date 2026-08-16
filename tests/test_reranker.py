@@ -37,17 +37,38 @@ from src.query.reranker import (
 )
 from src.schemas import ContextDoc
 
-# Measured 2026-08-03 by `python -m src.query.reranker --eval --refresh`, at 512
-# dims over 50 candidates. A change to any of these is a finding to be written
-# down in docs/metrics/query-path.md, not a constant to be re-tuned.
-QUERIES = 21
-GOLD_TOTAL = 51
-CAPS = {5: 45, 10: 50, 50: 51}
-ORACLE = {5: 37, 10: 41}
-PRE = {5: 23, 10: 28, 50: 41}
-POST = {5: 27, 10: 31, 50: 41}
+# Measured by `python -m src.query.reranker --eval --refresh`, at 512 dims over
+# 50 candidates. A change to any of these is a finding to be written down in
+# docs/metrics/query-path.md, not a constant to be re-tuned.
+#
+# RE-MEASURED 2026-08-15 ON THE 100-ROW EVAL SET. The 23-row values are kept
+# beside the new ones because the comparison is the interesting part, and because
+# nothing here is a re-tuning: the population changed from 21 scoreable queries
+# over 51 gold references to 90 over 203, so every one of these numbers HAD to
+# move. What did not have to move is the shape, and the shape is what §Findings
+# below pins.
+#
+#   2026-08-03, 21 queries / 51 gold:  CAPS {5:45,10:50,50:51}  ORACLE {5:37,10:41}
+#                                      PRE  {5:23,10:28,50:41}  POST {5:27,10:31,50:41}
+QUERIES = 90
+GOLD_TOTAL = 203
+CAPS = {5: 190, 10: 202, 50: 203}
+ORACLE = {5: 151, 10: 157}
+PRE = {5: 97, 10: 117, 50: 157}
+POST = {5: 100, 10: 123, 50: 157}
 
-# The one row that makes cap@5 and cap@10 differ at all.
+# THE ORACLE NOW BINDS HARDER THAN THE CAP, AND THAT IS THE HEADLINE.
+#
+# At 23 rows the candidate pool held 41 of 51 gold references (80%) and the cap
+# was the tighter constraint at k=5. At 100 rows the pool holds 157 of 203 (77%),
+# so **46 gold references are not retrievable at any k <= 50** and no reranker can
+# reach them. `pre@50 == post@50 == 157 == oracle@10` is that ceiling showing up
+# three times in one row of the table.
+UNREACHABLE = GOLD_TOTAL - PRE[50]          # 46
+assert UNREACHABLE == 46
+
+# The one row that made cap@5 and cap@10 differ at 23 rows. It is no longer alone
+# -- see test_rows_that_lose_references_between_k5_and_k10.
 BIG_ROW = "ag-001"
 BIG_ROW_GOLD = 11
 
@@ -210,19 +231,44 @@ def gold_counts() -> dict[str, int]:
     return {row["id"]: len(row["source_chunk_ids"]) for row in load_labeled_queries()}
 
 
-def test_recall_at_5_cannot_exceed_45_of_51_gold_references(gold_counts):
-    """A perfect reranker scores 88.2% at k=5. Comparing that against a k=10
-    ceiling of 98.0% -- which the phase plan asked for -- is a 9.8pp handicap
-    made of arithmetic, not of reranking."""
+def test_recall_at_k_cannot_exceed_the_arithmetic_ceiling(gold_counts):
+    """A perfect reranker scores 190/203 = 93.6% at k=5. Comparing that against a
+    k=10 ceiling of 99.5% -- which the phase plan asked for -- is a handicap made
+    of arithmetic, not of reranking.
+
+    The gap narrowed with the expansion (it was 88.2% vs 98.0% at 23 rows)
+    because the new questions average fewer gold chunks each, but it has not
+    closed and the comparison is still not one to make.
+    """
     assert sum(gold_counts.values()) == GOLD_TOTAL
     for k, cap in CAPS.items():
         assert sum(min(g, k) for g in gold_counts.values()) == cap
 
 
-def test_ag_001_is_the_only_row_that_loses_references_between_k5_and_k10(gold_counts):
+# The rows carrying more than 5 gold references, i.e. the only rows that can make
+# cap@5 differ from cap@10. `ag-001` was alone at 23 rows; the expansion added
+# three more aggregation rows, and ALL FOUR are aggregation -- which is the
+# stratum definitionally built out of enumerations.
+CAP_LOSERS = {"ag-001": 11, "ag-004": 7, "ag-005": 7, "ag-008": 8}
+
+
+def test_rows_that_lose_references_between_k5_and_k10_are_all_aggregation(gold_counts):
+    """At 23 rows this test was named `ag_001_is_the_only_row_...` and asserted a
+    singleton. That was a fact about a 23-row set, not an invariant, and the
+    expansion falsified it exactly as expected.
+
+    What survives is the stronger claim: every row with more than 5 gold
+    references is an `aggregation` row. If a single-hop question ever needs 6
+    passages, either the question or the gold labelling is wrong.
+    """
+    from src.index.recall_harness import load_labeled_queries
+
     losers = {qid: g for qid, g in gold_counts.items() if min(g, 10) > min(g, 5)}
-    assert losers == {BIG_ROW: BIG_ROW_GOLD}
-    assert CAPS[10] - CAPS[5] == min(BIG_ROW_GOLD, 10) - min(BIG_ROW_GOLD, 5)
+    assert losers == CAP_LOSERS
+    assert CAPS[10] - CAPS[5] == sum(min(g, 10) - min(g, 5) for g in losers.values())
+
+    strata = {r["stratum"] for r in load_labeled_queries() if r["id"] in losers}
+    assert strata == {"aggregation"}, f"a non-aggregation row carries >5 gold: {strata}"
 
 
 def test_only_the_aggregation_stratum_is_capped_below_100_percent_at_k5():
@@ -317,19 +363,61 @@ def test_reranking_the_whole_pool_cannot_change_recall_at_50(board):
     assert board["overall"]["delta@50"] == 0
 
 
-def test_every_per_stratum_delta_is_inside_the_pre_registered_resolution(board):
+# Per-stratum deltas that clear ADR-0004's +/-2-chunk resolution, measured on the
+# 100-row set. At 23 rows this set was EMPTY, and query-path.md said so: the
+# aggregate cleared the resolution but not one individual stratum did.
+#
+# At 90 scoreable queries instead of 21, four do -- and the SIGNS are the finding:
+#   cross-regulation  +5 @5, +4 @10   the reranker earning its keep
+#   two-hop           +3 @10
+#   three-hop         -3 @10          it costs recall here
+#   aggregation       -3 @5           and here
+RESOLVED_STRATA = {
+    ("cross-regulation", 5): 5,
+    ("cross-regulation", 10): 4,
+    ("two-hop", 10): 3,
+    ("three-hop", 10): -3,
+    ("aggregation", 5): -3,
+}
+
+
+def test_the_per_stratum_deltas_that_clear_the_resolution_are_the_ones_recorded(board):
     """Pre-registered before the first rerank ran, from ADR-0004's own rule.
 
-    The aggregate gains at k=5 (+4) and k=10 (+3) clear it; not one individual
-    stratum does. So no per-stratum claim is supportable from this eval set, and
-    query-path.md says so rather than narrating six one-chunk stories.
+    THIS TEST INVERTED AT THE 100-ROW EXPANSION, AND THE INVERSION IS THE RESULT.
+
+    It used to assert that NO per-stratum delta cleared +/-2, which is why
+    query-path.md declined to narrate six one-chunk stories. With 90 scoreable
+    queries instead of 21 the resolution is no longer the binding constraint, so
+    per-stratum claims became supportable -- and the honest form of the test is to
+    pin exactly WHICH ones rather than to keep asserting an emptiness that stopped
+    being true.
+
+    The negative entries matter as much as the positive ones. The reranker is not
+    uniformly good: it buys 5 chunks on cross-regulation at k=5 and gives 3 back
+    on three-hop at k=10. A benchmark reporting only the aggregate (+3 / +6) would
+    hide that.
     """
-    for name, stratum in board["strata"].items():
-        for k in (5, 10):
-            assert abs(stratum[f"delta@{k}"]) <= RESOLUTION_CHUNKS, (
-                f"{name} delta@{k} is {stratum[f'delta@{k}']}, now outside the "
-                f"resolution -- this is a finding, update query-path.md"
-            )
+    cleared = {
+        (name, k): stratum[f"delta@{k}"]
+        for name, stratum in board["strata"].items()
+        for k in (5, 10)
+        if abs(stratum[f"delta@{k}"]) > RESOLUTION_CHUNKS
+    }
+    assert cleared == RESOLVED_STRATA, (
+        "the set of per-stratum deltas clearing the resolution moved -- that is a "
+        "finding, to be written into docs/metrics/query-path.md rather than "
+        "absorbed into this constant"
+    )
+
+
+def test_the_reranker_is_not_uniformly_positive(board):
+    """The claim the README table must not overstate. Pinned so that a later sweep
+    making rerank uniformly positive registers as a change rather than being
+    absorbed as a tidier story."""
+    assert any(v < 0 for v in RESOLVED_STRATA.values())
+    assert board["overall"]["delta@5"] > 0
+    assert board["overall"]["delta@10"] > 0
 
 
 def test_the_aggregate_gain_at_k5_clears_the_resolution(board):
@@ -368,7 +456,29 @@ def test_latency_excludes_nothing_silently(board, artifact):
     """
     assert board["rerank_calls"] == len(artifact)
     assert {qid for qid, _ in board["rerank_stalls"]} <= {row["id"] for row in artifact}
-    assert board["rerank_retried"] == [], "retried calls now exist; latency needs re-reading"
+
+    # THE TAUTOLOGY RESOLVED ITSELF, EXACTLY AS THE DOCSTRING ABOVE PREDICTED.
+    #
+    # This assertion was `== []` and could not fail, because every `attempts` in
+    # the artifact was written by the broken `_call.retry.statistics` accessor and
+    # was therefore 1 by construction. `reranker._rerank_call` was fixed to read
+    # `_call.statistics`, and the docstring said a re-run "would populate the
+    # field for real and this assertion would start meaning what it says".
+    #
+    # The 2026-08-15 re-run over 100 questions is that re-run. 9 of 100 calls
+    # genuinely retried, and they are the same 9 that appear at the top of the
+    # stall list with 51-88 s wall clock. The retry machinery is now observable,
+    # which is what makes the p95 exclusion below a measurement rather than a hope.
+    assert board["rerank_retried"], (
+        "no retried calls recorded -- either the key stopped rate-limiting or the "
+        "tenacity statistics accessor regressed to the broken one"
+    )
+    retried = set(board["rerank_retried"])
+    worst = {qid for qid, ms in board["rerank_stalls"] if ms > 10_000}
+    assert retried == worst, (
+        f"every multi-second stall should be a retry and vice versa; "
+        f"retried-but-fast={retried - worst}, slow-but-not-retried={worst - retried}"
+    )
 
 
 def test_the_artifact_is_beside_the_eval_set_not_under_data():

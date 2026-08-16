@@ -39,11 +39,19 @@ from src.answer.answer_path import (
 from src.answer.context_assembly import BUDGETS, DEFAULT_BUDGET_N
 from src.schemas import ContextDoc
 
-# Read off the committed eval set. The router sends 10 of 23 rows to the graph
-# (9 `both`, 1 `graph`); `3h-002` carries `expected_fail` (ADR-0007). Quoted from
+# Read off the committed eval set. At 23 rows the router sent 10 to the graph
+# (9 `both`, 1 `graph`) carrying 35 gold chunks -- quoted from
 # docs/metrics/query-path.md, which measured them live.
-ROUTED_ROWS = 10
-ROUTED_GOLD = 35
+#
+# Re-read 2026-08-15 at the 100-row set: 52 routed rows (48 `both`, 4 `graph`)
+# carrying 151 gold chunks. `3h-002` still carries `expected_fail` (ADR-0007).
+#
+# NOTE FOR THE READER OF ANY GRAPH-SIDE NUMBER IN `answer-eval.jsonl`: that
+# artifact was swept against the 23-row set and its denominator is the OLD 10/35,
+# not this one. The two are not comparable and the artifact must be re-swept
+# before any figure computed from it is published beside a 100-row figure.
+ROUTED_ROWS = 52
+ROUTED_GOLD = 151
 
 # The four refusal rows, which are reported individually and never averaged.
 # `oos-002` says any citation is wrong while `hn-001`/`hn-002` say an uncited
@@ -71,27 +79,64 @@ VECTOR_GOLD_TOTAL = 51
 # statements per row, every gold chunk anywhere in the provenance union is also
 # the lexicographic minimum of *some* statement's own provenance. The
 # `ContextDoc` boundary never cost a gold chunk.
-ORACLES = {"oracle_provenance": 25, "oracle_shown": 25, "oracle_primary": 25}
-PREREG_GOLD = 35
+# RE-MEASURED 2026-08-15 AT 100 ROWS, AND THE EQUALITY BROKE.
+#
+# At 23 rows all three oracles were equal (25/25/25) and ADR-0014 recorded that
+# as a surprise: the step plan predicted `path_to_prose` keeping only `chunks[0]`
+# would cost gold chunks, and it did not, because with hundreds of statements per
+# row every gold chunk in the provenance union was also the lexicographic minimum
+# of SOME statement's own provenance.
+#
+# At 52 routed rows it costs exactly one, on `th-010`: provenance 2, shown 1,
+# primary 1. So the inference ADR-0014 called false is now true-but-tiny, and the
+# honest form is "the ContextDoc boundary costs 1 gold chunk in 151" rather than
+# either "never" or "as predicted".
+ORACLES = {"oracle_provenance": 62, "oracle_shown": 61, "oracle_primary": 61}
+PREREG_GOLD = 151
+
+# The single row where the rendering boundary loses a chunk. Named, not counted.
+ORACLE_BOUNDARY_ROWS = ["th-010"]
 
 # ADR-0013 scored 9 rows (32 gold) after `bucket_of` drops `3h-002`. Recomputing
 # 24 of 32 on that subset from this step's own code, through a different code
 # path, is the cross-check that the two steps are measuring the same graph.
-ADR_0013_ROWS = 9
-ADR_0013_GOLD = 32
-ADR_0013_ORACLE = 24
+# Re-measured 2026-08-15: 51 rows / 148 gold after `bucket_of` drops `3h-002`,
+# and the selector's own sweep reports oracle 62 on the same subset.
+ADR_0013_ROWS = 51
+ADR_0013_GOLD = 148
+# Over the 51 SCORED rows (3h-002 dropped). Note these are one lower than the
+# 52-row figures in ORACLES above -- `3h-002` contributes one chunk to
+# `oracle_provenance` and none to the other two.
+ADR_0013_ORACLE = {"oracle_provenance": 61, "oracle_shown": 60, "oracle_primary": 60}
 
 # 3,310 statements over 10 routed rows. query-path.md publishes 2,886 over the
 # 9 scored rows, and 3,310 - 424 (`3h-002`) = 2,886 exactly.
-STATEMENTS_TOTAL = 3310
-STATEMENTS_SCORED = 2886
-TOKENS_MEAN, TOKENS_MAX, TOKENS_UNCAPPED = 22.3, 63, 74357
+# 12,121 statements over 52 routed rows -- a mean of 233 per row and a max of
+# 670. At 23 rows it was 3,310 over 10. The graph path's verbosity scales with
+# the question set, which is what makes the budget arm below load-bearing.
+STATEMENTS_TOTAL = 12121
+TOKENS_MEAN, TOKENS_MAX, TOKENS_UNCAPPED = 20.1, 63, 272117
 
-# Gold retention by arm at the pre-registered N, of 35 gold over 10 routed rows.
+# Gold retention by arm at the pre-registered N, of 151 gold over 52 routed rows.
 # Computed with no generation and no spend -- retention is a pure function of
 # which statements survive the budget.
-RETENTION_AT_50 = {"uncapped": 25, "anchor": 10, "first": 8, "roundrobin": 4}
-RETENTION_AT_100 = {"uncapped": 25, "anchor": 18, "first": 17, "roundrobin": 14}
+#
+# THE ADOPTED ARM RETAINS 20 OF 61 REACHABLE GOLD CHUNKS AT N=50, AND THAT IS THE
+# MOST CONSEQUENTIAL NUMBER ON THIS PAGE.
+#
+# `uncapped` reaches 61 -- the whole of `oracle_primary` -- because it applies no
+# budget at all. `first-50`, which ADR-0014 adopted, keeps 20. At 23 rows the same
+# comparison was 25 vs 8 on a much smaller denominator; the shape is unchanged and
+# the stakes are four times larger, because 33 of 52 routed rows now carry more
+# than 50 statements where 10 of 10 carried fewer.
+#
+# ADR-0014 did NOT adopt `first` on retention -- it adopted it because it was the
+# only arm that produced a scored answer on every row, and `anchor` and `uncapped`
+# truncated. That rationale is untouched by these numbers. But the cost of the
+# choice is now four times more visible, and a hybrid arm that underperforms in
+# the Phase 5 benchmark should be read against this table before anything else.
+RETENTION_AT_50 = {"uncapped": 61, "anchor": 26, "first": 20, "roundrobin": 17}
+RETENTION_AT_100 = {"uncapped": 61, "anchor": 44, "first": 38, "roundrobin": 33}
 
 # Generation, on the 21 rows every arm scored (36 gold). `ag-001` and `th-001`
 # are excluded because some arm truncated on them -- which is precisely the two
@@ -562,20 +607,45 @@ def test_the_scored_subset_reproduces_adr_0013s_twenty_four_of_thirty_two(artifa
     ]
     assert len(prereg) == ADR_0013_ROWS
     assert sum(len(row["gold"]) for row in prereg) == ADR_0013_GOLD
-    for name in ORACLES:
-        assert sum(len(row[name]) for row in prereg) == ADR_0013_ORACLE, name
+    for name, expected in ADR_0013_ORACLE.items():
+        assert sum(len(row[name]) for row in prereg) == expected, name
+    # THE CROSS-CHECK, AND IT PAIRS WITH THE SELECTOR'S *RULES* ARM, NOT ITS ORACLE.
+    #
+    # The two are different quantities and pairing them wrongly is an easy mistake
+    # to encode: `template_selector`'s `oracle` is the best single (template,
+    # anchor) per row chosen with the gold visible, while this step's
+    # `oracle_provenance` is what the RULES-selected plan actually asserted. They
+    # coincided at 23 rows (24 == 24), which is what made the cross-check look
+    # like an identity; at 100 rows the selector's oracle is 62 and its rules arm
+    # is 61, and 61 is the number this step must reproduce.
+    from src.query import template_selector as ts
+
+    other = ts.scoreboard(load_questions(), ts.load_artifact())
+    assert ADR_0013_ORACLE["oracle_provenance"] == other["rules"]["gold_hit"], (
+        "the two steps disagree about what the rules-selected plan reaches -- "
+        "one of them is wrong, and they run through entirely different code"
+    )
+    assert other["oracle"] > other["rules"]["gold_hit"], (
+        "the selector's oracle no longer exceeds its rules arm; if these are "
+        "equal again the pairing above stops being a real cross-check"
+    )
 
 
 def test_the_statement_count_reconciles_with_query_path_md(board, artifact):
-    """2,886 over 9 scored rows there, 3,310 over 10 routed rows here, and the
-    difference is exactly `3h-002`. Two documents quoting two numbers that do not
-    reconcile is how a metrics directory stops being auditable."""
+    """12,121 statements over 52 routed rows, and the scored subset is that minus
+    exactly `3h-002`. Two documents quoting two numbers that do not reconcile is
+    how a metrics directory stops being auditable."""
     assert board["statements_total"] == STATEMENTS_TOTAL
     expected_fail = next(
         row for row in artifact
         if row.get("budget") == PREREG_KEY and row["id"] == "3h-002"
     )
-    assert STATEMENTS_TOTAL - expected_fail["statements"] == STATEMENTS_SCORED
+    scored = STATEMENTS_TOTAL - expected_fail["statements"]
+    assert scored > 0
+    assert scored == sum(
+        row["statements"] for row in artifact
+        if row.get("budget") == PREREG_KEY and row["id"] != "3h-002"
+    )
 
 
 def test_the_token_measurement_is_what_the_budget_was_chosen_against(board):
@@ -603,16 +673,40 @@ def test_the_budget_costs_more_gold_than_any_arm_difference_recovers(board):
     assert ceiling - best > (best - worst) * 2
 
 
-def test_no_capped_arm_beats_the_constant_outside_the_pre_registered_resolution(board):
-    """`anchor` is +2 over `first` at N=50 and +1 at N=100. ADR-0004 declared a
-    +-2 chunk resolution for this eval set and `reranker.RESOLUTION_CHUNKS`
-    encodes it. +2 is *at* the boundary, which the house rule reads as no
-    measured difference -- so anchor did not earn the adoption."""
+# `anchor` minus `first`, at each pre-registered N, on the 100-row set.
+ANCHOR_OVER_FIRST = {50: 6, 100: 6}
+
+
+def test_anchor_now_beats_the_adopted_constant_outside_the_resolution(board):
+    """THIS TEST INVERTED AT 100 ROWS, AND ADR-0014 SHOULD BE READ WITH IT.
+
+    At 23 rows `anchor` was +2 over `first` at N=50 and +1 at N=100. ADR-0004
+    declares a +-2 chunk resolution for this eval set, so +2 is *at* the boundary
+    and the house rule reads that as no measured difference -- which is why the
+    old form of this test asserted `anchor - first <= 2` and concluded "anchor did
+    not earn the adoption".
+
+    At 52 routed rows the gap is +6 at both N=50 and N=100, outside the resolution
+    at both. `anchor` is now measurably the better budget on retention.
+
+    **ADR-0014's adoption still stands, and it does not rest on this.** `first`
+    was adopted because it was the only arm that produced a scored answer on every
+    row -- `anchor` and `uncapped` ran to MAX_TOKENS on `th-001`. A budget that
+    retains more gold and then truncates the answer retains nothing. What has
+    changed is that the trade is now visible and priced: adopting `first` costs 6
+    gold chunks of retention, where at 23 rows it cost an amount indistinguishable
+    from zero.
+
+    This is a finding for ADR-0014, not a constant to re-tune, and re-running the
+    five arms at 100 rows is what would settle whether `anchor` still truncates.
+    """
     from src.query.reranker import RESOLUTION_CHUNKS as INHERITED
 
     assert RESOLUTION_CHUNKS == INHERITED
-    for curve in (RETENTION_AT_50, RETENTION_AT_100):
-        assert curve["anchor"] - curve["first"] <= RESOLUTION_CHUNKS
+    for n, curve in ((50, RETENTION_AT_50), (100, RETENTION_AT_100)):
+        gap = curve["anchor"] - curve["first"]
+        assert gap == ANCHOR_OVER_FIRST[n], f"the anchor-vs-first gap at N={n} moved"
+        assert gap > RESOLUTION_CHUNKS
 
 
 def test_roundrobin_is_measurably_worse_than_the_constant(board):

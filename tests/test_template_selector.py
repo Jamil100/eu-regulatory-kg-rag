@@ -18,12 +18,19 @@ from src.query import router, template_selector as ts
 from src.query.cypher_templates import TEMPLATES, TEMPLATE_PARAMS
 from src.query.graph_query import run_template
 
-# Measured 2026-08-04 by `python -m src.query.template_selector --eval --refresh`.
+# Measured by `python -m src.query.template_selector --eval --refresh`.
 # A regression below these is a defect, not a re-tuning.
-RULES_GOLD_HITS = 24
-GOLD_TOTAL = 32
-SCORED_ROWS = 9
-BEST_CONSTANT = 8  # always-obligations_for_system, by edge-intersection
+#
+# RE-MEASURED 2026-08-15 ON THE 100-ROW EVAL SET. The 23-row values are kept
+# beside the new ones because the comparison is the point. The scored set grew
+# from 9 routed rows to 51, so every absolute here had to move; what did not have
+# to move is ADR-0013's conclusion, and it did not.
+#
+#   2026-08-04, 9 scored rows:  RULES 24/32  R7B 14/32  ORACLE 24  CONSTANT 8
+RULES_GOLD_HITS = 61
+GOLD_TOTAL = 148
+SCORED_ROWS = 51
+BEST_CONSTANT = 40  # always-obligations_for_system, by edge-intersection
 
 # The pre-registration, published in ADR-0013 and docs/metrics/query-path.md.
 #
@@ -33,9 +40,9 @@ BEST_CONSTANT = 8  # always-obligations_for_system, by edge-intersection
 # was asserting `24 == 24` with the right-hand side typed by me. `scoreboard()` now
 # computes all three from the artifact, and these are the assertions against it --
 # the same arrangement `tests/test_reranker.py` has with CAPS and ORACLE.
-ORACLE = 24  # best single (template, anchor) per row, chosen with the gold visible
-CEILING_EDGE = 9  # a template traverses a declared edge, of 9 scored
-CEILING_ANCHOR = 9  # the linker can fill that template, of 9 scored
+ORACLE = 62  # best single (template, anchor) per row, chosen with the gold visible
+CEILING_EDGE = 47  # a template traverses a declared edge, of 51 scored
+CEILING_ANCHOR = 51  # the linker can fill that template, of 51 scored
 
 # R7B's figure is a SINGLE SAMPLE and is asserted as a bound, not an equality.
 # Two sweeps of the same 23 questions at `temperature=0, seed=42` returned 16 and
@@ -44,13 +51,16 @@ CEILING_ANCHOR = 9  # the linker can fill that template, of 9 scored
 # `test_the_rules_arm_still_reproduces_the_artifact` asserting byte-exact
 # reproduction; the model arm cannot have that test, which is itself part of what
 # ADR-0013 weighs. The committed artifact is the record of the run the ADR quotes.
-R7B_GOLD_HITS_CEILING = 20
-DOCS_ANNEX_CAVEATED = 6
+R7B_GOLD_HITS_CEILING = 37
+DOCS_ANNEX_CAVEATED = 27  # 6 at 23 rows; the deferred annex `section` defect is
+                          # flagged in real output on 27 statements at 100 rows
 
-# Measured before either arm existed. `always-obligations_for_system` scoring 8 of
-# 9 against a ceiling of 9 of 9 is why gold yield is the headline and
-# edge-intersection is reported only beside its constants.
-CEILING = 9
+# Measured before either arm existed. `always-obligations_for_system` scoring 40 of
+# 47 against a ceiling of 47 is why gold yield is the headline and
+# edge-intersection is reported only beside its constants. The constant is even
+# closer to the ceiling at 100 rows (85%) than it was at 23 (89% of 9), so the
+# argument for not using the edge metric as the headline is unchanged.
+CEILING = 47
 
 
 @pytest.fixture(scope="module")
@@ -306,9 +316,27 @@ def test_r7b_loses_to_the_rules_by_a_margin_no_resample_closes(board) -> None:
     assert board["rules"]["gold_hit"] > board["r7b"]["gold_hit"]
 
 
-def test_the_graph_path_answers_every_row_it_is_given(board) -> None:
-    """Reach, counted in statements rather than rows."""
-    assert board["rules"]["rows_answerable"] == SCORED_ROWS
+# Scored rows on which the rules arm executes a plan that returns nothing.
+SILENT_ROWS = ["3h-009", "ag-006", "xr-009"]
+
+
+def test_the_graph_path_answers_all_but_three_rows_it_is_given(board) -> None:
+    """Reach, counted in statements rather than rows.
+
+    At 9 scored rows this asserted the graph answered every one. At 51 it answers
+    48, and the three it does not are named rather than absorbed into a rate:
+
+      `3h-009`, `xr-009`  S6-bridge selects a template whose traversal returns no
+                          rows -- the bridge the rule assumes is not in the graph
+      `ag-006`            S0-none: no rule fires at all, so no plan is built
+
+    `ag-006` is the interesting one. It is "What are the AI Act's administrative
+    fine tiers?", a row deliberately labelled `graph` because the four Art. 99
+    paragraphs are lexically near-identical and defeat embedding retrieval. The
+    selector reaching nothing for it means that row is currently answered by
+    neither path well -- the same shape as `xr-007` above.
+    """
+    assert board["rules"]["rows_answerable"] == SCORED_ROWS - len(SILENT_ROWS)
     assert board["rules"]["docs_rendered"] > 0
 
 
@@ -358,17 +386,39 @@ def test_no_arm_exceeds_the_oracle(board) -> None:
         assert board[arm]["gold_hit"] <= board["oracle"], arm
 
 
-def test_rules_reaches_the_oracle(board) -> None:
-    """The deterministic arm matches the best single call per row, chosen with the
-    gold visible. Selection is therefore NOT the binding constraint on this eval
-    set -- what the templates can reach at all is. Same shape as Step 4's finding
-    that ranking rather than retrieval bound the vector path.
+# The single row where the oracle beats the rules on the 100-row set.
+ORACLE_GAP_ROWS = ["xr-007"]
 
-    The rules may emit up to MAX_CALLS, so equalling a best-*single*-call oracle
-    is a finding rather than an arithmetic certainty: combining templates bought
-    nothing here.
+
+def test_rules_falls_one_row_short_of_the_oracle(board) -> None:
+    """AT 23 ROWS THE RULES EQUALLED THE ORACLE EXACTLY (24 == 24). AT 100 THEY DO
+    NOT, AND THE ONE ROW THEY LOSE IS NAMED.
+
+    The old form of this test asserted equality and concluded that "selection is
+    NOT the binding constraint on this eval set -- what the templates can reach at
+    all is". That conclusion survives, barely: 61 of a 62 oracle is still a
+    selector that is almost never the thing standing between the graph and the
+    gold, and the reach ceiling (`CEILING_ANCHOR = 51` rows) is still the real
+    limit. But equality was a property of 9 rows, not a law, and it is gone.
+
+    The row is `xr-007` ("Does the AI Act override the GDPR?"). The rules pick
+    `cross_regulation` via S3-cross-instrument and fill it with the wrong anchor;
+    the oracle picks the same template anchored on `GDPR` and gets 2 gold chunks.
+
+    **`xr-007` is the hardest row in the set and this is the second time it has
+    surfaced.** It is also one of the three rows whose gold is entirely absent
+    from the vector path's 50-candidate pool. So neither path reaches it by
+    default: the vector arm cannot retrieve it and the graph arm anchors it
+    wrongly. A row that defeats both halves independently is worth more than its
+    one point, and it is the row to look at first if the hybrid underperforms.
     """
-    assert board["rules"]["gold_hit"] == board["oracle"]
+    gap = board["oracle"] - board["rules"]["gold_hit"]
+    assert gap == len(ORACLE_GAP_ROWS), (
+        f"the rules-to-oracle gap moved to {gap} -- that is a finding for "
+        f"ADR-0013, not a constant to retune"
+    )
+    assert board["rules"]["gold_hit"] == RULES_GOLD_HITS
+    assert board["oracle"] == ORACLE
 
 
 def test_the_edge_metric_is_beaten_by_a_constant(board) -> None:

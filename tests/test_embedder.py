@@ -19,6 +19,10 @@ from src.index.recall_harness import load_labeled_queries
 EXPECTED_TOTAL = 1108
 EXPECTED_SHAPES = {"paragraph": 906, "annex": 108, "definition": 94}
 
+# Eval rows carrying at least one gold chunk, i.e. everything the recall harness
+# can score. 21 at the 23-row eval set; 90 at the 100-row set (2026-08-15).
+LABELED_QUERIES = 90
+
 
 # --------------------------------------------------------------------------
 # Pure -- no database
@@ -36,12 +40,17 @@ def test_load_corpus_is_the_whole_corpus():
 def test_labeled_queries_all_have_gold_chunks():
     """The harness must never score a row that has nothing to be scored against.
 
-    Two eval rows (`out-of-scope`, `unanswerable`) correctly carry no gold
-    chunks, and counting them as recall misses would penalise the system for
-    behaving correctly.
+    The `out-of-scope` and `unanswerable` rows correctly carry no gold chunks,
+    and counting them as recall misses would penalise the system for behaving
+    correctly. `hard-negative` is the refusal mode that DOES carry gold, and it
+    is deliberately in scope here.
+
+    21 at the 23-row set, 90 at the 100-row set (2026-08-15): 100 questions minus
+    the 5 out-of-scope and 5 unanswerable rows. The count is pinned because a
+    silent drop would shrink every recall denominator without changing a rate.
     """
     queries = load_labeled_queries()
-    assert len(queries) == 21
+    assert len(queries) == LABELED_QUERIES
     assert all(q["source_chunk_ids"] for q in queries)
     assert {q["stratum"] for q in queries}.isdisjoint({"out-of-scope", "unanswerable"})
 

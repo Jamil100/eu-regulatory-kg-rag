@@ -32,10 +32,14 @@ from src.answer.citation_validator import (
 from src.query.router import QUESTIONS
 from src.schemas import Citation
 
-# Read off the committed eval set 2026-08-05. 41 distinct label strings across
-# 23 questions, in three shapes: `AIA Art. 9(1)`, the unparagraphed `AIA Art. 60`,
-# and the nested `AIA Annex III(1)(a)`.
-DISTINCT_GOLD_LABELS = 41
+# Read off the committed eval set 2026-08-05 at 23 questions (41 labels) and
+# re-read 2026-08-15 at 100 (101 labels), in three shapes: `AIA Art. 9(1)`, the
+# unparagraphed `AIA Art. 60`, and the nested `AIA Annex III(1)(a)`.
+#
+# The expansion added no fourth shape, which is the substantive result here --
+# all 101 still `fullmatch` unchanged, so `LABEL_RE` needed no widening for the
+# 60 new labels including the `AIA Annex XI` and `AIA Annex III(4)` forms.
+DISTINCT_GOLD_LABELS = 101
 
 
 def cite(start: int, end: int, text: str, chunk_id: str = "c1") -> Citation:

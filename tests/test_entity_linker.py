@@ -25,10 +25,15 @@ from src.query.entity_linker import (
     link_detailed,
 )
 
-# Measured 2026-08-03 by `python -m src.query.entity_linker --eval`. A regression
-# below this is a defect, not a re-tuning: every question reaching at least one
-# node is what makes the graph route available at all.
-ROWS_LINKING = 23
+# Measured 2026-08-03 by `python -m src.query.entity_linker --eval` at 23 rows and
+# re-measured 2026-08-15 at 100. A regression below this is a defect, not a
+# re-tuning: every question reaching at least one node is what makes the graph
+# route available at all.
+#
+# 99 of 100, and the one that reaches nothing is `oos-005` -- see
+# `test_every_answerable_question_links_at_least_one_node` for why that is the
+# correct outcome rather than a miss.
+ROWS_LINKING = 99
 
 
 @pytest.fixture(scope="module")
@@ -192,10 +197,29 @@ def test_display_name_is_carried_and_is_not_the_key():
 # Behaviour under the eval set
 # --------------------------------------------------------------------------
 
-def test_every_question_links_at_least_one_node(rows):
-    """`ag-001`'s canary in code: a question linking nothing has no graph route."""
-    unlinked = [row["id"] for row in rows if not link(row["question"])]
-    assert not unlinked, f"questions reaching no node: {unlinked}"
+def test_every_answerable_question_links_at_least_one_node(rows):
+    """`ag-001`'s canary in code: a question linking nothing has no graph route.
+
+    NARROWED TO ANSWERABLE ROWS AT THE 100-ROW EXPANSION, AND THE CARVE-OUT IS
+    THE FINDING RATHER THAN A CONCESSION.
+
+    The assertion was global when `out-of-scope` was a single row. At five rows
+    the stratum makes the global form incoherent: an out-of-scope question asks
+    about a regulation that is not in the corpus, so reaching *no* node in the
+    corpus is the correct outcome, and forcing one would mean the linker had
+    matched a Chinese labelling rule to an EU provision. `oos-005` is the row
+    that exercises it; the other four out-of-scope rows do link, because they
+    name concepts the EU corpus also uses ("automated decision-making",
+    "recommender systems"), and that is precisely why refusal cannot be left to
+    retrieval reaching nothing.
+
+    Everything that must be answerable is still held to the original bar, and
+    `ROWS_LINKING` pins the total so a future drop shows up here as a number
+    rather than as a quieter benchmark.
+    """
+    answerable = [row for row in rows if row["stratum"] != "out-of-scope"]
+    unlinked = [row["id"] for row in answerable if not link(row["question"])]
+    assert not unlinked, f"answerable questions reaching no node: {unlinked}"
     assert sum(bool(link(row["question"])) for row in rows) == ROWS_LINKING
 
 

@@ -83,17 +83,41 @@ def test_a_pronoun_tail_is_not_a_second_hop():
     assert result.rule == "R5-default"
 
 
-def test_r1_is_inert_on_this_eval_set(rows):
-    """The phase plan called "links to zero nodes" a strong rule. Step 2 measured
-    the link rate at 23 of 23, so it fires on nothing here.
+# R1 fires on exactly one row of the 100-row set. See the test below.
+R1_ROWS = ["oos-005"]
 
-    Asserted rather than described, so that a linker change which starts dropping
-    questions shows up as a failure here -- at which point R1 becomes load-bearing
-    and this test is the thing that says so.
+
+def test_r1_is_load_bearing_on_exactly_one_row(rows):
+    """R1 STOPPED BEING INERT AT THE 100-ROW EXPANSION, WHICH IS WHAT THIS TEST
+    WAS BUILT TO ANNOUNCE.
+
+    It used to assert `fired == []`: Step 2 measured the link rate at 23 of 23,
+    so "links to zero nodes" fired on nothing, and the old docstring said the
+    assertion existed so that "a linker change which starts dropping questions
+    shows up as a failure here -- at which point R1 becomes load-bearing and this
+    test is the thing that says so."
+
+    It did, and this is it saying so. The row is `oos-005` ("What labelling does
+    China's deep synthesis regulation require?"), and it is the one case where
+    reaching no node is the CORRECT outcome rather than a linker regression: the
+    question is about a regulation the corpus does not contain. R1 sends it to
+    `vector`, which is its gold route, so R1 is now a rule that earns a correct
+    answer rather than a guard that never runs.
+
+    The other four out-of-scope rows do link, because they name concepts the EU
+    corpus also uses -- so this is emphatically not "out-of-scope rows link
+    nothing", and refusal cannot be delegated to retrieval coming back empty.
     """
     fired = [r["id"] for r in rows
              if router.route_by_rules(r["question"]).rule == "R1-no-links"]
-    assert fired == [], f"R1 is no longer inert: {fired} -- update ADR-0012"
+    assert fired == R1_ROWS, f"R1's firing set moved: {fired} -- update ADR-0012"
+    by_id = {r["id"]: r for r in rows}
+    for rid in fired:
+        assert by_id[rid]["stratum"] == "out-of-scope", (
+            f"{rid} links no node but is not out-of-scope -- that is a linker "
+            f"regression, not a correct refusal"
+        )
+        assert by_id[rid]["route"] == "vector"
 
 
 def test_r1_still_works_when_it_does_fire():
@@ -168,14 +192,42 @@ def test_the_rules_arm_still_reproduces_the_artifact(rows, artifact):
         )
 
 
+# Re-measured 2026-08-15 on the 100-row eval set. ADR-0012 published 21/22 and
+# 10/22 on the 23-row set; both are kept here because the DROP is the finding.
+#
+# THE 95% WAS OVERFITTING AND THIS IS THE EVIDENCE. The rules router reaches
+# `both` through exactly one regex (`R4-second-ask`), tuned while looking at 23
+# questions. On 77 unseen ones it generalises poorly: 24 rows whose gold is `both`
+# are routed `vector` because they phrase the second hop in a way the regex does
+# not match ("Which GDPR fine tier applies?", "when must X and when must it Y").
+#
+# The adoption still stands -- rules at 71% beats the majority-class constant at
+# 48% -- but the headline number does not, and `eval/run_benchmark.py` grew a
+# `hybrid-oracle` arm so the benchmark can separate the router's error from the
+# hybrid's capability instead of confounding them.
+RULES_CORRECT, RULES_SCORED = 70, 99
+R7B_CORRECT, R7B_SCORED = 44, 99
+
+
 def test_rules_accuracy_is_what_adr_0012_claims(board):
-    assert board["rules"]["correct"] == 21
-    assert board["rules"]["scored"] == 22
+    assert board["rules"]["correct"] == RULES_CORRECT
+    assert board["rules"]["scored"] == RULES_SCORED
 
 
 def test_r7b_accuracy_is_what_adr_0012_claims(board):
-    assert board["r7b"]["correct"] == 10
-    assert board["r7b"]["scored"] == 22
+    assert board["r7b"]["correct"] == R7B_CORRECT
+    assert board["r7b"]["scored"] == R7B_SCORED
+
+
+def test_the_rules_router_still_beats_the_majority_class_constant(board):
+    """The adoption criterion from ADR-0012, re-checked on the bigger set. It is
+    the claim that survived the expansion; the 95% headline is the one that did
+    not, and the gap between rules and the best constant narrowed from 8 rows to
+    22 percentage points on four times the data."""
+    constants = {k: v["correct"] for k, v in board.items()
+                 if isinstance(v, dict) and k.startswith("always")}
+    assert constants, "the constant arms vanished from the scoreboard"
+    assert board["rules"]["correct"] > max(constants.values())
 
 
 def test_r7b_never_emits_the_third_class(artifact):
