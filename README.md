@@ -2,13 +2,66 @@
 
 Hybrid Knowledge Graph + Vector RAG over the **EU AI Act** and **GDPR**, built on the Cohere model stack (Command A, Command R7B, Embed v4, Rerank 3.5).
 
-## Benchmark (fill after Phase 5)
+## Benchmark
 
-| System | Single-hop | Two-hop | Three-hop | Cross-reg | Aggregation | Refusal | p95 latency | $/query |
+**The hybrid did not beat the vector baselines. It is the slowest and most
+expensive of the three and it wins no accuracy column outright.** That is the
+result, and this section reports it rather than the result the repository was
+built expecting.
+
+Cells are `answers judged correct / rows scored`, over a 100-question stratified
+eval set. Graded by an LLM judge (Command A, temperature 0) that agrees with a
+hand-graded 20% sample **17 of 20 times (85%)**.
+
+| System | Single-hop | Two-hop | Three-hop | Cross-reg | Aggregation | Refusal* | p95 latency | $/query |
 |---|---|---|---|---|---|---|---|---|
-| Vector-only | – | – | – | – | – | – | – | – |
-| Vector + Rerank 3.5 | – | – | – | – | – | – | – | – |
-| **Hybrid (graph+vector)** | – | – | – | – | – | – | – | – |
+| Vector-only | 16/20 | 9/20 | 0/13 | 3/15 | 0/9 | 11/20 | 9.8 s (n=30) | $0.0041 |
+| Vector + Rerank 3.5 | 14/19 | 6/20 | 1/14 | 5/15 | 2/7 | 12/19 | 19.2 s (n=30) | $0.0065 |
+| **Hybrid (graph+vector)** | 15/20 | 5/20 | 1/14 | 5/15 | 1/7 | 8/20 | 10.9 s (n=30) | $0.0076 |
+| Hybrid, gold route [ceiling] | 15/19 | 4/20 | 2/14 | 4/14 | 1/7 | 7/19 | – | – |
+
+`[ceiling]` is not a deployable system: it replays the eval set's hand-verified
+route labels, which a live request does not have. **The gap to it is −1 answer**,
+so the adopted router (70/99 on this set) is not what holds the hybrid back —
+routing *more* questions to the graph did not help.
+
+\*Refusal is three behaviours with three different correct outputs and is never
+averaged into one number:
+
+| System | Out-of-scope (cite nothing) | Unanswerable (cite nothing) | Hard-negative (must cite) |
+|---|---|---|---|
+| Vector-only | 2/5 | 4/5 | 5/10 |
+| Vector + Rerank 3.5 | 4/5 | 3/5 | 5/9 |
+| Hybrid (graph+vector) | 2/5 | 2/5 | 4/10 |
+| Hybrid, gold route | 1/5 | 2/5 | 4/9 |
+
+**The number that explains the table is not in it:** `partially_correct` is
+42–46% of answers for *every* system. Only `correct` counts as a pass, so nearly
+half the mass sits in one excluded bucket identically across all four arms, and
+the differences between systems are swamped. On three-hop every system scores
+exactly 8 partial / 5 wrong whether or not it received graph statements. These
+systems mostly produce legally incomplete answers, and they do so at the same rate.
+
+Three measured facts constrain how much of this the architecture can be blamed for:
+
+- **22.7% of gold passages are unreachable** by the vector path at any `k ≤ 50` —
+  but 0% on single-hop and 35% on aggregation. The retrieval ceiling predicted
+  parity at the easy end and a collapse at the hard end, and that is what happened.
+- **The adopted graph budget retains 20 of the 61 reachable gold chunks.**
+  The hybrid enters the benchmark having already discarded two-thirds of what its
+  own graph path found ([ADR-0014](docs/adr/adr-0014-graph-statement-budget.md)).
+- **The three systems agree far more than they differ.** 40% / 43% / 36% correct.
+
+Reproduce, with no API key and no containers:
+
+```bash
+python -m eval.run_benchmark --eval        # the table, from the committed artifact
+python -m eval.judge --agreement           # the 85%, and the 3 rows it disagreed on
+```
+
+Full method, caveats and the debugging narrative:
+[docs/metrics/benchmark.md](docs/metrics/benchmark.md) ·
+[docs/failure-notes.md](docs/failure-notes.md)
 
 ## 90-second demo
 
