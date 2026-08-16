@@ -13,7 +13,10 @@ lost to the passage cap and 51 are ranked below noise**, so ranking is the
 binding constraint and the cap binds on no stratum but aggregation. A BM25 +
 full-text union lifts the pool from 157/203 to 176/203 — the largest retrieval
 gain measured here — and delivers **+2 into the prompt**, so it is committed and
-switched off. The
+switched off. **Using structure to reorder the pool rather than add to it fails
+too**: article diversity, graph-connectivity boosting and inbound `REFERENCES`
+were measured offline against the committed pools and the best of them is +2
+chunks at p = 0.500. Six levers, none of which moves the ranking stage. The
 graph path now runs end to end: deterministic template selection reaches **24 of
 32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
 and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
@@ -515,7 +518,9 @@ case: gold `gdpr-art15-para1` sits at rerank rank 30 with score 0.141 while
 displaced by a sibling paragraph of the same article — `aia-art6-para2` is
 outranked by `aia-art6-para3` on three separate questions — which is a
 chunking-shaped failure (ADR-0003), but it is a quarter of the total, not most
-of it.
+of it. On the union pool the same count is **11 of 66 (16.7%)** — see §Structure
+as a reordering signal, where a diversity constraint built to exploit exactly
+this fails, because on 21 of 90 rows the gold *is* a sibling cluster.
 
 #### Rerank 3.5 is deterministic here. The embedding is not.
 
@@ -591,6 +596,113 @@ while ordering is the constraint. Depth is the lever if it is ever revisited:
 recovery is back-loaded (+2 at depth 5, +9 at 20, +13 at 30, +19 at 50) and
 **depth 30 keeps every pool under 100 documents**, so it buys +13 at unchanged
 rerank billing.
+
+#### Structure as a reordering signal: three interventions, all negative
+
+Every lever tried before this ADDED material to the pipeline and failed the same
+way — graph statements (0 wins, 4 losses), cap 5→8 (+6 chunks, ~80% noise), the
+lexical union (+19 pool, +2 prompt). This session tested the opposite: use
+structure to **reorder and filter the existing pool**, sending no extra passages.
+
+All three are permutations of a committed rerank ordering, so relevance is held
+fixed and only the selection policy changes. Nothing here is a live measurement
+and nothing cost anything. **All three failed, and the three failures have three
+different causes**, which is the useful part.
+
+**1. Article diversity — no variant wins on any stratum.**
+
+| variant | recall@5 | vs baseline | w/l/tie | p |
+|---|---|---|---|---|
+| plain rerank (baseline) | 49.3% (100) | — | — | — |
+| cap 2 per article | 48.3% (98) | −2 | 0/2/88 | 0.500 |
+| cap 3 per article | 48.8% (99) | −1 | 0/1/89 | 1.000 |
+| cap 4 per article | 48.8% (99) | −1 | 0/1/89 | 1.000 |
+| MMR, λ=0.9 | 46.3% (94) | −6 | 3/9/78 | 0.146 |
+| MMR, λ=0.7 | 41.9% (85) | −15 | 4/18/68 | **0.004** |
+
+**Zero wins for the hard cap, on any stratum, at any N** — the per-stratum table
+is flat or down in every cell. The reason is that sibling clustering is not
+purely a failure mode: **21 of 90 rows have gold containing two or more
+paragraphs of a single article, including 6 of the 10 aggregation rows.** A
+diversity constraint cannot tell "Art. 26(5) and 26(6) are both the answer" from
+"Art. 6(3) is crowding out Art. 6(2)", so it removes gold and noise at
+comparable rates. MMR is worse than the hard cap because it applies the penalty
+everywhere rather than only past a threshold.
+
+**The sibling-displacement fraction FELL on the union pool, against expectation.**
+It was 13 of 51 (25.5%) on the vector pool; on the union pool it is **11 of 66
+(16.7%)** — down in the fraction and down in the absolute count. The +19 was
+mostly enumerated siblings, so the prediction was that it would rise. What the
+lexical union actually added was competition from *unrelated* provisions: the
+non-sibling term went 38 → 55. Sibling confusion is a real but shrinking
+minority of the ordering problem, and that is an argument against reading the
+ordering loss as a chunking problem (ADR-0003).
+
+**2. Graph-connectivity boost — the signal is not discriminative.**
+
+Coverage first, as the gate: **90 of 90 scoreable questions resolve at least one
+entity** (mean 3.0, `entity_linker.link_detailed`), and 1,107 of 1,108 chunks
+carry `entity_ids`. Reach is not the problem. Discrimination is:
+
+- 1 hop from an anchor: **66.2%** of the top-50 pool is already "connected"
+- 2 hops: **84.6%**
+
+A boost that marks two-thirds to five-sixths of the candidates is close to a
+constant, and where it is not, it mostly demotes the unconnected third — which
+contains gold at roughly the pool's base rate. Sweeping the bonus:
+
+| bonus | 1-hop | 2-hop |
+|---|---|---|
+| +0.05 | +0 (0/0/90) | **+2** (2/0/88, p=0.500) |
+| +0.10 | +0 (0/0/90) | +2 (2/0/88) |
+| +0.20 | −2 (0/2/88) | −1 (2/3/85) |
+| +0.30 | −4 (0/4/86) | −3 (1/4/85) |
+| +0.50 | −10 (0/10/80, p=0.002) | −10 (0/9/81, p=0.004) |
+
+The best cell is +2 chunks at p=0.500 — inside ADR-0004's resolution, i.e. no
+measured difference. Everything beyond a token bonus is monotonically harmful.
+The graph never entered the prompt in any of these arms; it was a scoring signal
+only, which is the one configuration the four prior graph measurements had not
+tried, and it does not work either.
+
+**3. Inbound `REFERENCES` (E3, first run) — the reach is 15 of 90.**
+
+The traversal is `(p)-[:REFERENCES]->(:Article {canonical_name: $a})`, reading
+`r.source_chunk_id`; 1,161 such edges are loaded and no template has ever
+traversed them. The question asked was deliberately narrow: not how much the
+pool gains, which the last session showed does not convert, but **how many gold
+chunks already in the union pool but ranked below 5 does it promote.**
+
+On the five rows nominated for it — `th-006`, `th-004`, `th-005`, `3h-005`,
+`ag-006` — 7 gold chunks are addressable (in pool, rank > 5). A linker-anchored
+traversal recovers **1**. An oracle anchor taken from the gold citations — a
+ceiling, not deployable — recovers **3**. Three of the five rows resolve no
+Article or Annex entity at all, because the question never names an article
+number: `3h-005` ("an employer deploys an AI system to evaluate candidates") and
+`ag-006` ("what are the AI Act's fine tiers") are topical, not referential.
+
+Corpus-wide that is the binding limit. **Only 15 of 90 scoreable questions
+resolve an Article/Annex anchor** — 0 of 15 cross-regulation rows do — against
+74 addressable gold chunks, of which the traversal recovers **4** (`th-006`,
+`th-015`, `3h-002`, `hn-008`; three of them the same chunk, `aia-art6-para2`).
+Applied as a hard promotion: 102 → 103 of 203, **net +1, 2 wins / 1 loss,
+p = 1.000**.
+
+`aia-art99-para4` is the one genuine success and it is worth naming, because it
+is exactly the case the E3 hypothesis was written for: `th-006` asks which
+penalty tier an Art. 16 breach falls into, the edge `aia art. 99(4)
+-REFERENCES-> aia art. 16` exists, and the traversal pulls `aia-art99-para4`
+from rank 10 into the prompt. The mechanism works. It fires four times in ninety
+questions.
+
+**Read together:** none of the three clears the +5 bar this session set, and
+none clears ADR-0004's ±2 either. The best result across every variant tested is
++2 chunks at p = 0.500. Reordering the pool with structure does not recover the
+51 mis-ordered chunks, for three separate reasons — diversity cannot distinguish
+gold siblings from noise siblings, connectivity marks most of the pool, and
+reference traversal reaches a sixth of the questions. That the causes are
+independent is what makes this a stronger negative than three variants of one
+idea would have been.
 
 #### Why the end-to-end measurement was not run
 
@@ -923,12 +1035,37 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
 - **The ranking stage is the binding constraint on the vector path, and nothing
   measured so far moves it.** 51 of 203 gold references are in the pool, would fit
   under the cap, and are ranked below noise. A wider pool made it worse in
-  absolute terms. 13 of those 51 are displaced by a sibling paragraph of the same
-  article, which is the chunking-shaped quarter (ADR-0003); the other 38 are
-  displaced by unrelated provisions and are not. The two candidate levers — a
-  different reranker, or a chunking change — are both larger decisions than any
-  taken here, and the 46/6/51 split is the evidence they should be argued
-  against.
+  absolute terms. The two candidate levers — a different reranker, or a chunking
+  change — are both larger decisions than any taken here, and the 46/6/51 split
+  is the evidence they should be argued against. **Structural reordering has now
+  been eliminated as a third option** (2026-08-16): article diversity, graph
+  connectivity and inbound `REFERENCES` were all measured offline against the
+  committed pools, best result +2 chunks at p = 0.500, and all three fail for
+  independent reasons. See §Structure as a reordering signal.
+- **Six levers have now been measured and every one of them has failed, which is
+  itself the finding.** Adding graph statements (0 wins / 4 losses), raising the
+  passage cap (+6 chunks, ~80% noise), the lexical union (+19 pool → +2 prompt),
+  article diversity (0 wins at any N), connectivity boosting (+2 at p = 0.500),
+  inbound `REFERENCES` (+1, p = 1.000). **Neither adding material nor reordering
+  it works.** What has never been changed is the relevance signal itself: the
+  cross-encoder is the one component in the narrowing stage that no experiment
+  has replaced, and it is the component the decomposition points at. The next
+  thing tried should be a different ranker, and if the eval set cannot resolve
+  the difference it makes, that is a statement about the eval set.
+- **`aia-art6-para2` is a recurring single point of failure and has never been
+  looked at directly.** It is displaced from the top 5 on `th-015`, `3h-015`,
+  `hn-008` and `3h-002`, outranked by `aia-art6-para3` on three of them, and it
+  is 3 of the 4 chunks the inbound-`REFERENCES` probe recovers. One paragraph
+  accounting for four rows across three strata is more likely a property of that
+  chunk — its length, its embedding, its overlap with its own neighbour — than
+  four independent ranking accidents. Cheap to inspect, never inspected.
+- **The entity linker resolves an Article or Annex entity on only 15 of 90
+  scoreable questions**, and 0 of 15 cross-regulation rows. Any method anchored
+  on a named provision — inbound `REFERENCES`, an enumeration bypass, a
+  locator lookup — inherits that ceiling before it does anything else. General
+  entity coverage is 90 of 90 and is not the problem; *referential* coverage is.
+  Whether that is the linker's `ANCHOR_TYPES` (see the bullet above) or simply
+  what these questions are, is unmeasured.
 - **The rerank rate has no first-party source.** See above. `search_units` is
   measured; the dollars are not.
 - ~~**`AskResponse.cost_usd` is `float` and required (`src/schemas.py:294`).** It
