@@ -4,9 +4,16 @@ Status: **Entity linker, router and vector path built and measured. 23 of 23 eva
 questions link to at least one graph node; 52% of links land in a gold chunk's
 entity set (64% excluding instrument nodes). Routing is deterministic: 21 of 22
 rows, $0.00, 3.5 ms — Command R7B scored 10 of 22, below the majority-class
-constant, and never emitted `both` at all. Rerank 3.5 over the top-50 lifts micro
-recall from 23/51 to 27/51 at k=5 and 28/51 to 31/51 at k=10 — a real aggregate
-gain, and not one per-stratum move clears this eval set's own resolution. The
+constant, and never emitted `both` at all. **Rerank 3.5's aggregate gain did not
+survive the 100-row eval set: +4 at k=5 became +2, which is inside ADR-0004's
+resolution, and the paired test puts it at 16 wins / 13 losses / 61 ties,
+p = 0.711 — no measured difference at the cap that ships.** Of the gold that
+never reaches the prompt, **46 references are outside the candidate pool, 6 are
+lost to the passage cap and 51 are ranked below noise**, so ranking is the
+binding constraint and the cap binds on no stratum but aggregation. A BM25 +
+full-text union lifts the pool from 157/203 to 176/203 — the largest retrieval
+gain measured here — and delivers **+2 into the prompt**, so it is committed and
+switched off. The
 graph path now runs end to end: deterministic template selection reaches **24 of
 32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
 and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
@@ -360,6 +367,16 @@ figure against what is achievable rather than against 15: **7/14 = 50%**, not
 
 ### The k-matrix
 
+> **n=23, SUPERSEDED.** Everything from here to §Latency was measured on the
+> 23-row eval set (21 scoreable queries, 51 gold references). The set is now 100
+> rows / 90 scoreable / 203 gold, and the re-measurement reverses the headline:
+> **the +4 at k=5 below does not survive, and rerank is not distinguishable from
+> the raw vector draw at the cap that ships.** These tables are kept because the
+> comparison is the interesting part and because ADR-0004's resolution rule was
+> pre-registered against them. Read
+> §[Vector path, re-measured at 100 rows](#vector-path-re-measured-at-100-rows-2026-08-16)
+> for the current numbers.
+
 | k | pre-rerank | post-rerank | delta | ceiling | top-50 oracle | hit rate pre → post |
 |---|---|---|---|---|---|---|
 | 5 | 23/51 — 45.1% | **27/51 — 52.9%** | **+4** | 45/51 | 37/51 | 76.2% → **85.7%** |
@@ -411,6 +428,191 @@ back at k=10. Whatever is wrong with two-hop retrieval, **it is not that the
 right paragraphs were never retrieved.** That points at ranking and at
 paragraph-level chunking (ADR-0003, `vector-index.md` §Open) rather than at the
 embedding.
+
+> **This subsection's title is the one claim here that got STRONGER at 100 rows,
+> and its body is the one that got weaker.** The title holds and is now
+> quantified: of the gold that never reaches the prompt, 6 chunks are lost to the
+> passage cap and 51 to ranking. The body does not: at 100 rows the pool holds
+> only 157 of 203, so "the candidate pool is not the constraint" is true of the
+> narrowing stage and false of retrieval overall — 46 gold references are
+> unreachable at any k ≤ 50. Both halves are measured below.
+
+### Vector path, re-measured at 100 rows (2026-08-16)
+
+The eval set went from 23 rows / 51 gold to 100 rows / 203 gold (`eval-set.md`),
+so every number above HAD to move. What did not have to move is the shape, and
+the shape moved too. All of this is recomputed from `eval/rerank-eval.jsonl` by
+`python -m src.query.reranker --eval` — pure, no key, no containers.
+
+#### The k-matrix, and the gain that stopped clearing the resolution
+
+| k | pre-rerank | post-rerank | delta | ceiling | top-50 oracle | hit rate pre → post |
+|---|---|---|---|---|---|---|
+| 5 | 98/203 — 48.3% | **100/203 — 49.3%** | **+2** | 190/203 | 151/203 | 80.0% → **90.0%** |
+| 10 | 117/203 — 57.6% | **123/203 — 60.6%** | **+6** | 202/203 | 157/203 | 90.0% → 93.3% |
+| 50 | 157/203 — 77.3% | 157/203 — 77.3% | 0 | 203/203 | — | 96.7% → 96.7% |
+
+**At k=5 — the cap that actually ships — the gain is +2 chunks, which is INSIDE
+ADR-0004's ±2 resolution.** At 23 rows it was +4 and cleared. The paired test
+says the same thing without relying on an aggregate: rerank vs the raw vector
+draw is **16 wins / 13 losses / 61 ties, exact McNemar p = 0.711**. There is no
+measured difference at k=5. `test_the_aggregate_gain_at_k5_does_NOT_clear_the_resolution`
+pins the inverted claim; the old test asserted the opposite and was changed
+deliberately rather than repaired.
+
+#### Per stratum
+
+| Stratum | n | gold | pre@5 | post@5 | Δ | pre@10 | post@10 | Δ | paired @5 (w/l) | p |
+|---|---|---|---|---|---|---|---|---|---|---|
+| single-hop | 20 | 24 | 21 | 20 | −1 | 22 | 22 | 0 | 1/2 | 1.000 |
+| two-hop | 20 | 42 | 24 | 24 | 0 | 26 | 29 | +3 | 3/3 | 1.000 |
+| three-hop | 15 | 44 | 17 | 17 | 0 | 24 | 21 | −3 | 3/3 | 1.000 |
+| cross-regulation | 15 | 32 | 12 | **17** | **+5** | 15 | 19 | +4 | **5/0** | 0.062 |
+| aggregation | 10 | 48 | 15 | **12** | **−3** | 19 | 20 | +1 | 2/4 | 0.688 |
+| hard-negative | 10 | 13 | 9 | 10 | +1 | 11 | 12 | +1 | 2/1 | 1.000 |
+
+The n=23 section above said no per-stratum claim was supportable. Two now are,
+and **they point in opposite directions**: cross-regulation is the reranker
+earning its keep (5 wins, **zero losses**, and the same sign at k=8 and k=10),
+aggregation is it costing recall. `vector-index.md` §Open nominated Rerank 3.5 as
+"the obvious lever on the two-hop figure" — two-hop is 3/3, dead even.
+
+So the deletion question does not have a clean answer. Rerank nets to noise
+overall while helping one stratum and hurting another, at 9.4 s p95 and
+$0.0024/query.
+
+#### Where the gold goes: retrieval 46, cap 6, ordering 51
+
+Three disjoint causes that sum to `gold − post@k`, derived by `scoreboard()` and
+printed by `--eval` so they cannot drift from a doc:
+
+| Stratum | gold | not retrieved | over cap | mis-ordered | reached |
+|---|---|---|---|---|---|
+| three-hop | 44 | 11 | 0 | 16 | 17 |
+| aggregation | 48 | 17 | **6** | 13 | 12 |
+| two-hop | 42 | 7 | 0 | 11 | 24 |
+| cross-regulation | 32 | 11 | 0 | 4 | 17 |
+| single-hop | 24 | 0 | 0 | 4 | 20 |
+| hard-negative | 13 | 0 | 0 | 3 | 10 |
+| **ALL** | **203** | **46** | **6** | **51** | **100** |
+
+**Ordering costs 8.5× what the cap costs, and the cap costs nothing at all
+outside aggregation.** Five of six strata have gold counts at or under 5, so
+`PASSAGE_TOP_N = 5` cannot lose them anything; only 4 rows in the whole set need
+more than 5 chunks (7, 7, 8, 11 — all aggregation). A perfect reranker at k=5
+would reach 151/203; it reaches 100.
+
+That is the answer to "is the passage cap too tight for multi-hop": **no, and not
+marginally — the cap is not binding on multi-hop at all.** Raising
+`PASSAGE_TOP_N` would move the 6-chunk term. `tests/test_reranker.py:LOSS` pins
+the decomposition and `test_the_cap_binds_only_on_aggregation` pins the
+per-stratum shape.
+
+On the 37 rows where gold was displaced out of the top 5, **4.03 of the 5 slots
+are non-gold on average**, and on 6 rows all five are. `th-011` is the clean
+case: gold `gdpr-art15-para1` sits at rerank rank 30 with score 0.141 while
+`gdpr-art12-para2` (0.535) takes slot 1. 13 of the 51 mis-ordered chunks are
+displaced by a sibling paragraph of the same article — `aia-art6-para2` is
+outranked by `aia-art6-para3` on three separate questions — which is a
+chunking-shaped failure (ADR-0003), but it is a quarter of the total, not most
+of it.
+
+#### Rerank 3.5 is deterministic here. The embedding is not.
+
+Two full `--eval --refresh` sweeps of an unchanged corpus, differenced:
+
+| | agreement between runs |
+|---|---|
+| rerank top-5 set and order | **100 / 100 rows** |
+| rerank relevance scores | 99.1% byte-identical (max Δ 0.00087, max rank move 1) |
+| candidate pool **membership** | 93 / 100 rows |
+| candidate pool **order** | 78 / 100 rows |
+
+This inverts the natural assumption. The cross-encoder is stable; `embed-v4.0`
+does not return byte-identical vectors, and the churn lands at the rank-50
+boundary. It moved `PRE[5]` from 97 to 98 — on `3h-015`, `aia-annex3-point1`
+displaced `aia-art26-para11` from slot 5 — so that constant is now a membership
+test (`PRE_5_UNSTABLE`) rather than an equality one. Every other pinned value
+held on both sweeps, including the whole 46/6/51 decomposition.
+
+Consequence worth stating plainly: `delta@5 = post@5 − pre@5` inherits the
+instability of its subtrahend, so a ±1-chunk aggregate delta at k=5 is not a
+measurement of anything.
+
+#### The lexical union: +19 into the pool, +2 into the prompt
+
+Postgres full-text search and an in-process Okapi BM25 (`src/query/lexical.py`,
+k1=1.2, b=0.75) were added as a **recall device**, unioned into the candidate
+pool with no score fusion, and the existing reranker kept as the ranking stage.
+
+Every lexical arm and every fusion **loses** as a ranker, which is why the union
+is a union and not an RRF:
+
+| arm | recall@5 | paired vs rerank (w/l/tie) | p |
+|---|---|---|---|
+| rerank 3.5 (shipping) | 49.3% | — | — |
+| vector only | 48.3% | 13/16/61 | 0.711 |
+| BM25 only | 37.4% | 7/30/53 | <0.001 |
+| pg_fts only | 10.3% | 2/67/21 | <0.001 |
+| RRF(vector, BM25) | 45.3% | 9/17/64 | 0.169 |
+| RRF(vector, pg_fts) | 30.5% | 8/42/40 | <0.001 |
+
+As a recall device it does exactly what it was built to do — and almost none of
+it survives the ranking stage:
+
+| | vector pool | union pool | delta |
+|---|---|---|---|
+| gold in pool | 157 | **176** | **+19** |
+| gold in top-5 | 100 | **102** | **+2** |
+| → retrieval loss | 46 | 27 | −19 |
+| → cap loss @5 | 6 | 8 | +2 |
+| → **ordering loss @5** | 51 | **66** | **+15** |
+
+**The union moved gold from a stage that could not reach it to a stage that ranks
+it below noise.** Paired at k=5 it is 2 wins / 0 losses / 88 ties, p = 0.500.
+Both lexical arms are needed for the +19 (BM25 alone is +7, pg_fts alone +14);
+they recover different things — pg_fts finds six of Annex III's eight
+near-identical enumerated points for `ag-008`, BM25 finds the Art. 99 fine tiers.
+
+It is **committed and switched off**: `answer_path.LEXICAL_DEPTH_LIVE = 0`, held
+by `test_the_union_is_measured_but_off_in_the_live_path`. What it would cost:
+
+| | before | after |
+|---|---|---|
+| documents sent to rerank | flat 50 | p50 106, p95 125, max 132 |
+| pools over Cohere's 100-doc search unit | 0% | **66%** |
+| billed search units / 100 questions | 100 | 198 (**1.98×**) |
+| rerank $/query | $0.0020 | $0.0040 |
+| rerank latency p50 | 264 ms | 386 ms |
+| lexical retrieval | — | +115 ms p50 |
+
+2× the rerank bill and ~240 ms for +2 gold chunks is not a trade worth making
+while ordering is the constraint. Depth is the lever if it is ever revisited:
+recovery is back-loaded (+2 at depth 5, +9 at 20, +13 at 30, +19 at 50) and
+**depth 30 keeps every pool under 100 documents**, so it buys +13 at unchanged
+rerank billing.
+
+#### Why the end-to-end measurement was not run
+
+The obvious follow-up is a majority-of-3 A/B of the union arm through generation.
+It was **deliberately not spent** (~$1.79), because the offline data bounds the
+result first: **75 of 100 rows receive a byte-identical passage set** under the
+two arms, so they can produce only provider noise (~5.3 expected flips at the
+7.1% rate). Of the 25 rows that change, **2 gain gold** and 23 swap one non-gold
+passage for another. A 2-row signal against a comparable noise floor is not
+measurable at this eval-set size, and the honest move is to say so rather than
+buy a null with three decimal places on it.
+
+The instrument exists for when there is signal: `eval/repeat_report.py` now has a
+majority-of-k reducer (`majority_verdicts`, `compare_arms`, exact McNemar) and a
+`rerank-pool` arm is wired into `run_benchmark.SYSTEMS`, replayable from the
+committed `pool_reranked` ordering.
+
+    python -m eval.repeat_report --system rerank --tags '' e1-run-a e1-run-b \
+        --vs rerank-pool --vs-tags p-run-a p-run-b p-run-c
+
+Free finding from building it: across the three existing `rerank` sweeps, **87 of
+100 rows are unanimous**, so 13 rows carry the entire 7.1% flip rate.
 
 ### Latency, in three components
 
@@ -691,13 +893,42 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
   untraversable relation types and the rules arm never fired it: S6 only triggers
   when nothing else matched, and something else always matched. Its provenance is
   also one arbitrary chunk per hop where parallel edges exist.
-- **Rerank leaves 10 of 13 available chunks unrecovered**, and nothing here
+- ~~**Rerank leaves 10 of 13 available chunks unrecovered**, and nothing here
   explains why. The candidate pool is not the constraint — that is measured — so
   the next lever is chunking (ADR-0003) or a different ranking signal, not a
-  bigger `top_k`.
-- **No per-stratum rerank claim is supportable at n=23.** Every stratum delta is
+  bigger `top_k`.~~ → **Quantified at 100 rows (2026-08-16), and the bullet's own
+  advice was then tested and failed.** It is 51 of 57 now, against 6 lost to the
+  passage cap. "Not a bigger `top_k`" was right for the wrong reason: `top_k` was
+  raised, in the strongest available form — a BM25 + full-text union that lifts
+  the pool from 157/203 to 176/203, the largest retrieval gain measured on this
+  corpus — and **+19 into the pool produced +2 into the prompt**, because
+  ordering loss rose 51 → 66 as retrieval loss fell 46 → 27. The pool is not the
+  constraint; feeding it more does not help while ranking is. The union is
+  committed and off (`LEXICAL_DEPTH_LIVE = 0`).
+- ~~**No per-stratum rerank claim is supportable at n=23.** Every stratum delta is
   0, +1 or +2 against a pre-registered resolution of ±2. The 100-row set is what
-  would make two-hop's +1 either a finding or a nothing.
+  would make two-hop's +1 either a finding or a nothing.~~ → **Answered at 100
+  rows, and two-hop was the wrong stratum to watch (2026-08-16).** Two-hop is
+  3 wins / 3 losses, dead even. The two claims that are now supportable point in
+  opposite directions: **cross-regulation +5 with zero losses** at k=5 (same sign
+  at k=8 and k=10), **aggregation −3**. The aggregate, meanwhile, went the other
+  way — +4 at n=23 became +2 at n=100, which no longer clears the ±2 resolution,
+  and the paired test puts rerank vs raw vector at p = 0.711.
+- **Whether Rerank 3.5 should be deleted is genuinely open.** It nets to no
+  measured difference at the shipping cap while consistently helping one stratum
+  and consistently hurting another, for 9.4 s p95 and $0.0024/query. Deleting it
+  recovers that and costs cross-regulation; keeping it pays for a stratum-level
+  wash. Neither is obviously right, and the decision should be taken against
+  whatever replaces the ranking stage rather than in isolation.
+- **The ranking stage is the binding constraint on the vector path, and nothing
+  measured so far moves it.** 51 of 203 gold references are in the pool, would fit
+  under the cap, and are ranked below noise. A wider pool made it worse in
+  absolute terms. 13 of those 51 are displaced by a sibling paragraph of the same
+  article, which is the chunking-shaped quarter (ADR-0003); the other 38 are
+  displaced by unrelated provisions and are not. The two candidate levers — a
+  different reranker, or a chunking change — are both larger decisions than any
+  taken here, and the 46/6/51 split is the evidence they should be argued
+  against.
 - **The rerank rate has no first-party source.** See above. `search_units` is
   measured; the dollars are not.
 - ~~**`AskResponse.cost_usd` is `float` and required (`src/schemas.py:294`).** It
