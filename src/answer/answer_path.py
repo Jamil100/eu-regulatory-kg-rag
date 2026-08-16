@@ -175,6 +175,12 @@ class AnswerResult:
     attempts: int = 1
     cost_usd: float | None = None
 
+    # SHA-256 of the exact body sent to Cohere for the answer that is being
+    # returned -- the FIRST call's body normally, the regeneration's when the
+    # regeneration's answer is the one kept. Carried so a re-run can be asked
+    # whether it sent the same request, not just whether it got the same text.
+    request_sha: str = ""
+
     route_ms: float = 0.0
     graph_ms: float = 0.0
     vector_ms: float = 0.0
@@ -416,6 +422,7 @@ def answer(
         content_blocks=generated.content_blocks,
         dropped=generated.dropped,
         attempts=generated.attempts,
+        request_sha=generated.request_sha,
         cost_usd=(
             None
             if generated.cost_usd is None
@@ -452,6 +459,10 @@ def _merge_cost(first: Any, second: Any, keep_answer: bool = False) -> Any:
         latency_ms=first.latency_ms + second.latency_ms,
         attempts=max(first.attempts, second.attempts),
         dropped=[*first.dropped, *second.dropped],
+        # The hash follows the answer, not the cost: `kept` is whichever call's
+        # prose survives, and the point of the field is to name the request that
+        # produced the recorded text.
+        request_sha=kept.request_sha,
     )
 
 
