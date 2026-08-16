@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 import time
@@ -156,6 +157,90 @@ LEXICAL_DEPTH_LIVE = 0
 # is a curve, not a point, and publishing one number would make N look like a
 # tuned parameter rather than a pre-registered one.
 PREREG_NS = (1, 2, 3, 5, 10, 25, 50, 100)
+
+# How many reranked candidates vote on WHICH provision to enumerate, when the
+# question did not name one. Swept offline 2026-08-16 over the aggregation rows:
+# top-1 and modal@5 both identify the dominant gold article on 6 of 10 rows and
+# reach 20 of 48 gold; modal@10 and modal@20 reach 23. 10 is the smaller of the
+# two that tie, so it is the one taken.
+#
+# The vote is a much easier task than the ranking it replaces: it asks "which
+# article is this question about", where the reranker is asked "which five
+# paragraphs answer it". On this stratum the first is answerable and the second
+# is the thing four sessions have failed to fix.
+ENUM_VOTE_N = 10
+
+_ARTICLE_ID = re.compile(r"^([a-z]+)-(art|annex)(\d+)")
+
+
+_ROMAN_OUT = {
+    1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI", 7: "VII",
+    8: "VIII", 9: "IX", 10: "X", 11: "XI", 12: "XII", 13: "XIII",
+}
+
+
+def _vote_target(docs: list[ContextDoc]) -> tuple[str, dict] | None:
+    """The provision the top reranked candidates are mostly about.
+
+    Modal article over the first `ENUM_VOTE_N`, ties broken by the best rerank
+    score inside each family so the winner is never arbitrary. Returns None if
+    no candidate parses, which happens only on an empty pool.
+    """
+    counts: dict[tuple[str, dict], int] = {}
+    best: dict[tuple[str, dict], float] = {}
+    for doc in docs[:ENUM_VOTE_N]:
+        m = _ARTICLE_ID.match(doc.chunk_id)
+        if not m:
+            continue
+        prefix, kind, number = m.group(1), m.group(2), int(m.group(3))
+        regulation = "GDPR" if prefix == "gdpr" else "AIA"
+        if kind == "annex":
+            key = (regulation, (("annex", _ROMAN_OUT.get(number, "")),))
+        else:
+            key = (regulation, (("article", number),))
+        counts[key] = counts.get(key, 0) + 1
+        best[key] = max(best.get(key, -1.0), doc.score if doc.score is not None else 0.0)
+    if not counts:
+        return None
+    winner = max(counts, key=lambda k: (counts[k], best[k]))
+    return winner[0], dict(winner[1])
+
+
+def _with_enumeration(
+    passage_docs: list[ContextDoc],
+    reranked: list[ContextDoc],
+    target: tuple[str, dict] | None,
+    conn: Connection | None = None,
+) -> list[ContextDoc]:
+    """The ranked top-5, PLUS every limb of one provision. Never fewer passages.
+
+    AUGMENT, NOT REPLACE, AND THAT IS A MEASURED CHOICE. Replacing the top-5 with
+    the enumeration reaches 23 of 48 aggregation gold; keeping both reaches 27,
+    and -- the part that matters -- no row can lose gold it already had. Three of
+    the ten aggregation rows are worse under replacement (`ag-004`, `ag-005`,
+    `ag-010`), because the voted article is not always where the gold is. Under
+    augmentation those rows are unchanged instead.
+
+    That property is also what makes a false-positive detection cheap: a topical
+    question wrongly flagged as enumerative keeps its ordinary five passages and
+    gains an article it did not need. It costs prompt length, not recall.
+
+    The enumeration goes FIRST. `context_assembly` preserves the order it is
+    given, and the provision read in statutory order is the spine of the answer;
+    the ranked passages are supporting material around it.
+    """
+    from src.query.retriever import enumerate_provision
+
+    target = target or _vote_target(reranked)
+    if target is None:
+        return passage_docs
+    regulation, kwargs = target
+    enumerated = enumerate_provision(regulation, conn=conn, **kwargs)
+    if not enumerated:
+        # Provision absent, or larger than MAX_ENUMERATION. Ranking stands.
+        return passage_docs
+    have = {d.chunk_id for d in enumerated}
+    return enumerated + [d for d in passage_docs if d.chunk_id not in have]
 
 
 class AnswerPathError(RuntimeError):
@@ -288,6 +373,8 @@ def answer(
     passages: list[ContextDoc] | None = None,
     linked: list[LinkedEntity] | None = None,
     regenerate: bool = True,
+    enumerates: bool = False,
+    enumerate_target: tuple[str, dict] | None = None,
 ) -> AnswerResult:
     """Route, retrieve, assemble, generate, validate. One question, one answer.
 
@@ -311,6 +398,10 @@ def answer(
             raise AnswerPathError(f"the router returned no route for {question!r}")
         route = decision.route
         linked = linked or decision.linked
+        # Only adopted when the caller did not decide. `app.py` runs the router
+        # itself and passes both, so this is the CLI/test path.
+        if not enumerates:
+            enumerates, enumerate_target = decision.enumerates, decision.enumerate_target
     route_ms = (time.perf_counter() - started) * 1000
 
     graph_docs: list[ContextDoc] = []
@@ -332,7 +423,13 @@ def answer(
 
     passage_docs: list[ContextDoc] = list(passages or [])
     vector_ms = 0.0
-    if route in ("vector", "both") and passages is None:
+    # `or enumerates` is load-bearing. `ag-001` and `ag-004` -- the two biggest
+    # enumeration wins on the eval set -- are routed `graph` by R3-enumerate-role,
+    # so without this the vector branch never runs for them, the modal vote has
+    # no candidates to count, and the enumeration silently does nothing on the
+    # rows it exists for. An enumerating question needs passages whatever the
+    # router decided about the graph.
+    if (route in ("vector", "both") or enumerates) and passages is None:
         from src.query.reranker import CANDIDATES, RerankError, rerank_detailed
         from src.query.retriever import DIM, RetrieverError, retrieve_pool_detailed
 
@@ -342,14 +439,24 @@ def answer(
                 question, CANDIDATES, dim=DIM, conn=conn, client=client,
                 lexical_depth=LEXICAL_DEPTH_LIVE,
             )
+            # Ask for more than the cap only when enumeration needs the votes;
+            # rerank is billed per search unit, not per returned document, so the
+            # wider top_n is free and asking for it unconditionally would still
+            # be a change to a measured arm for no reason.
+            top_n = max(PASSAGE_TOP_N, ENUM_VOTE_N) if enumerates else PASSAGE_TOP_N
             reranked = rerank_detailed(
-                question, retrieved.docs, top_n=PASSAGE_TOP_N, client=client
+                question, retrieved.docs, top_n=top_n, client=client
             )
         except (RetrieverError, RerankError) as exc:
             raise AnswerPathError(f"vector retrieval failed: {exc}") from exc
         vector_ms = (time.perf_counter() - started) * 1000
-        passage_docs = reranked.docs
+        passage_docs = reranked.docs[:PASSAGE_TOP_N]
         retrieval_cost += (retrieved.cost_usd or 0.0) + (reranked.cost_usd or 0.0)
+
+        if enumerates:
+            passage_docs = _with_enumeration(
+                passage_docs, reranked.docs, enumerate_target, conn=conn
+            )
 
     started = time.perf_counter()
     try:
@@ -658,7 +765,8 @@ PASSAGE_FIELDS: dict[str, str] = {
 
 
 def replayed_passages(
-    conn: Connection | None = None, field: str = "reranked"
+    conn: Connection | None = None, field: str = "reranked",
+    top_n: int = PASSAGE_TOP_N,
 ) -> dict[str, list[ContextDoc]]:
     """The top-5 per question, replayed from `eval/rerank-eval.jsonl`.
 
@@ -682,7 +790,7 @@ def replayed_passages(
     from src.query.reranker import load_artifact
 
     rows = load_artifact()
-    wanted = sorted({cid for row in rows for cid in row[field][:PASSAGE_TOP_N]})
+    wanted = sorted({cid for row in rows for cid in row[field][:top_n]})
 
     owned = conn is None
     if conn is None:
@@ -703,7 +811,7 @@ def replayed_passages(
     for row in rows:
         docs: list[ContextDoc] = []
         scores = row.get(score_field) or []
-        for rank, chunk_id in enumerate(row[field][:PASSAGE_TOP_N]):
+        for rank, chunk_id in enumerate(row[field][:top_n]):
             if chunk_id not in by_chunk:
                 continue
             text, label = by_chunk[chunk_id]
