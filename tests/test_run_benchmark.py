@@ -20,8 +20,8 @@ from eval.run_benchmark import (
     ORACLE_SYSTEM,
     PASSING,
     REFUSAL_STRATA,
-    SYSTEMS,
     SYSTEM_ORDER,
+    SYSTEMS,
     bucket_of,
     load_questions,
     markdown_table,
@@ -420,7 +420,6 @@ def test_cost_is_derived_over_every_scored_row_not_sampled():
     """$/query is exactly determined by recorded quantities, so it is computed
     over all scored rows rather than observed on whichever subset the live pass
     could afford. A live row must not be needed for the cost column at all."""
-    from eval.run_benchmark import analytic_cost
 
     retrieval = {"sh-001": {"embed": 0.000003, "rerank": 0.002}}
     board = scoreboard([row(system="rerank", rid="sh-001", cost_usd=0.004)], retrieval)

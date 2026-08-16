@@ -363,3 +363,113 @@ def test_retrieve_leaves_no_session_settings_behind(indexed):
     vector = _stored_vector(indexed, "aia-art9-para1")
     retrieve("unused", 10, vector=vector, conn=indexed)
     assert indexed.execute("SHOW enable_seqscan").fetchone()[0] == before
+
+
+# --------------------------------------------------------------------------
+# The lexical union pool (measured 2026-08-16, not shipped -- see
+# answer_path.LEXICAL_DEPTH_LIVE)
+# --------------------------------------------------------------------------
+
+QUESTION = "Which GDPR fine tier covers a refusal to answer subject access requests?"
+
+
+# THE VECTOR IS PINNED, AND THAT IS LOAD-BEARING RATHER THAN AN OPTIMISATION.
+#
+# These are A/B tests over the same draw, and `retrieve_detailed` embeds on every
+# call. embed-v4.0 does not return byte-identical vectors for identical input:
+# two live sweeps of the unchanged corpus differed in pool MEMBERSHIP on 7 of 100
+# questions and in pool ORDER on 22 (`tests/test_reranker.py:PRE_5_UNSTABLE`).
+# Written the obvious way, `test_lexical_depth_zero_is_exactly_the_old_behaviour`
+# compares two independent embeddings and fails at the tail of the top-50 -- it
+# did, at index 20, before this was pinned.
+#
+# Using a stored chunk embedding as the query vector fixes the vector half
+# exactly, leaves the lexical half driven by the question text where it belongs,
+# and costs no API call. Same injection point, and same reasoning, as
+# `recall_at_k(vectors=...)`.
+def _pool_args(conn):
+    return {"conn": conn, "vector": _stored_vector(conn, "gdpr-art83-para5")}
+
+
+def test_the_pool_is_a_superset_of_the_vector_draw(indexed):
+    """Union, not replacement. The vector draw must survive intact and in order,
+    because every number measured before the union existed was measured on it."""
+    from src.query.retriever import retrieve_pool_detailed
+
+    args = _pool_args(indexed)
+    vector_only = retrieve_detailed(QUESTION, 50, **args)
+    pooled = retrieve_pool_detailed(QUESTION, 50, lexical_depth=20, **args)
+
+    vector_ids = [d.chunk_id for d in vector_only.docs]
+    assert [d.chunk_id for d in pooled.docs[: len(vector_ids)]] == vector_ids
+    assert len(pooled.docs) == len(vector_ids) + pooled.lexical_added
+
+
+def test_lexical_depth_zero_is_exactly_the_old_behaviour(indexed):
+    """The A/B control. If this drifts, the 'before' arm of every pool
+    measurement stops being the system that was measured before."""
+    from src.query.retriever import retrieve_pool_detailed
+
+    args = _pool_args(indexed)
+    baseline = retrieve_detailed(QUESTION, 50, **args)
+    control = retrieve_pool_detailed(QUESTION, 50, lexical_depth=0, **args)
+
+    assert [d.chunk_id for d in control.docs] == [d.chunk_id for d in baseline.docs]
+    assert [d.score for d in control.docs] == [d.score for d in baseline.docs]
+    assert control.lexical_added == 0
+    assert control.lexical_ms == 0.0
+
+
+def test_lexical_only_candidates_carry_no_score(indexed):
+    """BM25 and ts_rank_cd are not on the cosine scale and must not pretend to be.
+
+    A lexical-only candidate arriving with a plausible-looking float would be
+    sortable against the vector half, and the resulting ordering would be
+    meaningless in a way nothing downstream could detect.
+    """
+    from src.query.retriever import retrieve_pool_detailed
+
+    pooled = retrieve_pool_detailed(
+        QUESTION, 50, lexical_depth=20, **_pool_args(indexed)
+    )
+    assert pooled.lexical_added > 0, "no lexical candidates to check"
+
+    scored = [d for d in pooled.docs if d.score is not None]
+    unscored = [d for d in pooled.docs if d.score is None]
+    assert len(scored) == 50, "the vector half must keep its cosine scores"
+    assert len(unscored) == pooled.lexical_added
+    assert all(d.source == "PASSAGE" for d in pooled.docs)
+
+
+def test_the_pool_has_no_duplicates(indexed):
+    """A chunk found by both the vector draw and a lexical arm must appear once.
+    Sending it twice would pay to rerank it twice and let it take two of the five
+    prompt slots."""
+    from src.query.retriever import retrieve_pool_detailed
+
+    pooled = retrieve_pool_detailed(
+        QUESTION, 50, lexical_depth=50, **_pool_args(indexed)
+    )
+    ids = [d.chunk_id for d in pooled.docs]
+    assert len(ids) == len(set(ids))
+
+
+def test_the_union_is_measured_but_off_in_the_live_path():
+    """THE ADOPTION SWITCH, pinned so that turning it on is a deliberate edit.
+
+    The union lifts gold-in-pool 157/203 -> 176/203 but only 100 -> 102 into the
+    prompt, because ordering loss rises 51 -> 66 as retrieval loss falls 46 -> 27
+    (`tests/test_reranker.py:LOSS`). It costs 2.0x rerank billing and ~240 ms. It
+    is therefore committed, replayable and OFF.
+
+    This test is not defending the value 0. It is defending the pairing: if the
+    live path is ever switched on, `docs/metrics/query-path.md` has to carry the
+    end-to-end measurement that justified it, which does not exist today.
+    """
+    from src.answer.answer_path import LEXICAL_DEPTH_LIVE
+
+    assert LEXICAL_DEPTH_LIVE == 0, (
+        "the lexical union is enabled in the live path; that needs an end-to-end "
+        "measurement in docs/metrics/query-path.md, which the 2026-08-16 session "
+        "explicitly did not run (2-row signal against a comparable noise floor)"
+    )
