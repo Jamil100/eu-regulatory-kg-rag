@@ -130,6 +130,20 @@ _ENUMERATE_PROVISION = re.compile(
     re.I,
 )
 
+# THE REJECTED WIDER VARIANT, KEPT SO THE REJECTION CAN BE RE-MEASURED.
+#
+# Adds a plural head noun after "what/which". Reaches 8 of 10 aggregation rows
+# against the adopted 4, and costs 5 false positives on the 80 non-aggregation
+# answerable rows (6.2%) against 1 (1.2%). It is NOT wired into `route_by_rules`;
+# `eval/run_benchmark.py` names it through the `rerank-enum-wide` arm so the
+# trade can be measured end to end rather than argued from recall.
+_ENUMERATE_PROVISION_WIDE = re.compile(
+    _ENUMERATE_PROVISION.pattern
+    + r"|\b(what|which)\b.{0,40}\b(obligations|rights|requirements|tiers"
+      r"|categories|areas|mechanisms|grounds|cases|conditions|principles)\b",
+    re.I,
+)
+
 # An explicit provision reference in the question beats anything inferred from
 # retrieval. `ag-008` ("Which areas of use does Annex III of the AI Act cover?")
 # is the case that matters: the retrieval-derived target picks `aia-art49` and
