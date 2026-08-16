@@ -530,3 +530,93 @@ def test_a_missing_api_key_raises_generate_error_rather_than_exiting(monkeypatch
     monkeypatch.setattr("src.config.settings.cohere_api_key", "")
     with pytest.raises(GenerateError, match="is not set"):
         generate_detailed("q", DOCUMENTS)
+
+
+# --------------------------------------------------------------------------
+# `request_sha` -- the E1 instrument
+#
+# The point of the field is to make "was it the same request?" answerable
+# instead of assumed. That only works if the hash covers the body that was
+# actually sent, so the tests below pin it to `client.chat`'s own kwargs rather
+# than to a reconstruction -- if the two ever drift, the instrument is lying and
+# the determinism finding built on it is void.
+# --------------------------------------------------------------------------
+
+def _sha_of(client_calls: list[dict]) -> str:
+    """Recompute the digest from what the fake client was actually handed."""
+    import hashlib
+    import json
+
+    return hashlib.sha256(
+        json.dumps(
+            client_calls[0], sort_keys=True, ensure_ascii=False, default=str
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_request_sha_is_the_hash_of_the_body_the_client_was_handed():
+    """Not of a reconstruction. `_chat_call` builds one dict, hashes it, and
+    splats it -- so the digest and the wire payload cannot disagree."""
+    client = FakeChatClient([text_block("a")])
+    result = generate_detailed("q", DOCUMENTS, client=client)
+    assert result.request_sha == _sha_of(client.calls)
+
+
+def test_the_same_question_and_documents_hash_the_same():
+    first = FakeChatClient([text_block("a")])
+    second = FakeChatClient([text_block("DIFFERENT TEXT ENTIRELY")])
+    a = generate_detailed("q", DOCUMENTS, client=first)
+    b = generate_detailed("q", DOCUMENTS, client=second)
+    # Identical body, different response -- which is exactly the case E1 exists
+    # to detect, and the hash must not move with the response.
+    assert a.request_sha == b.request_sha
+    assert a.answer != b.answer
+
+
+@pytest.mark.parametrize(
+    "question, documents",
+    [
+        ("a different question", DOCUMENTS),
+        ("q", [{"id": "d0", "data": {"text": "DIFFERENT", "source": "PASSAGE", "citation": "L"}}]),
+        ("q", [*DOCUMENTS, {"id": "d1", "data": {"text": "extra", "source": "GRAPH", "citation": "M"}}]),
+    ],
+    ids=["question", "document-text", "document-count"],
+)
+def test_any_change_to_the_payload_changes_the_hash(question, documents):
+    """The failure this guards against is a hash that is stable because it is
+    blind: one that ignored `documents` would report "same request" across two
+    genuinely different context assemblies and misattribute our bug to Cohere."""
+    base = generate_detailed("q", DOCUMENTS, client=FakeChatClient([text_block("a")]))
+    other = generate_detailed(question, documents, client=FakeChatClient([text_block("a")]))
+    assert base.request_sha != other.request_sha
+
+
+def test_the_regeneration_turn_hashes_differently_from_the_first_call():
+    """`answer_path` regenerates with an appended correction turn precisely so
+    the second request is NOT the first one repeated. If both hashed the same,
+    the determinism test would quietly count a deliberately different request as
+    evidence about the provider."""
+    first = generate_detailed("q", DOCUMENTS, client=FakeChatClient([text_block("a")]))
+    messages = [
+        *build_messages("q"),
+        {"role": "assistant", "content": "a"},
+        {"role": "user", "content": "cite only the documents provided"},
+    ]
+    retry = generate_detailed(
+        "q", DOCUMENTS, client=FakeChatClient([text_block("b")]), messages=messages
+    )
+    assert first.request_sha != retry.request_sha
+
+
+def test_the_hash_covers_the_decoding_parameters():
+    """`temperature`, `seed` and `max_tokens` are in the body, so a change to
+    any of them must move the digest -- otherwise raising MAX_TOKENS would look
+    like the same request returning different text."""
+    client = FakeChatClient([text_block("a")])
+    generate_detailed("q", DOCUMENTS, client=client)
+    body = client.calls[0]
+    assert body["temperature"] == 0
+    assert body["seed"] == 42
+    assert body["max_tokens"] == MAX_TOKENS
+    mutated = {**body, "max_tokens": MAX_TOKENS + 1}
+    assert _sha_of([mutated]) != _sha_of([body])

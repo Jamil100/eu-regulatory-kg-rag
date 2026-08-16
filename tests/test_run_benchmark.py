@@ -465,3 +465,81 @@ def test_the_oracle_arm_publishes_no_latency_or_cost_claim():
     table = markdown_table(scoreboard(artifact, {}))
     oracle_line = next(l for l in table.splitlines() if "[ceiling]" in l and l.startswith("|"))
     assert oracle_line.rstrip().endswith("| - | - |"), oracle_line
+
+
+# --------------------------------------------------------------------------
+# Repeat sweeps -- `run_tag`
+#
+# A repeat run is identical to the published one in `system` and `mode`, which
+# are the only two fields the scoreboard groups on. So without a tag the second
+# sample of an arm would be pooled INTO that arm: the denominator would double,
+# every row would appear twice, and the pooled cell would silently average a
+# system against itself. These tests pin the isolation in both directions.
+# --------------------------------------------------------------------------
+
+def test_a_tagged_row_is_not_scored_as_part_of_the_published_arm():
+    """The published table is the untagged rows and nothing else."""
+    artifact = [
+        row(rid="sh-001", verdict="correct"),
+        row(rid="sh-001", verdict="wrong", run_tag="e1-run-b"),
+    ]
+    board = scoreboard(artifact)
+    cell = board["hybrid"]["per_stratum"]["single-hop"]
+    assert cell["n"] == 1, "the tagged repeat must not enlarge the denominator"
+    assert cell["pass"] == 1, "the tagged repeat must not change the numerator"
+
+
+def test_a_tagged_sweep_alone_produces_no_published_systems():
+    """A run that is entirely tagged has measured nothing publishable. It must
+    read as an empty board rather than as a benchmark result."""
+    board = scoreboard([row(run_tag="e1-run-a"), row(run_tag="e1-run-a", rid="sh-002")])
+    assert board["systems"] == []
+
+
+def test_an_untagged_artifact_is_unaffected_by_the_tag_filter():
+    """The filter must be a no-op on every artifact written before tags existed;
+    rows predating the field have no `run_tag` key at all."""
+    artifact = three_systems()
+    for r in artifact:
+        r.pop("run_tag", None)
+    board = scoreboard(artifact)
+    assert board["systems"], "pre-tag artifacts must still score"
+    assert board["common"]["n"] >= 1
+
+
+def test_sweep_records_the_tag_and_can_restrict_to_a_stratum():
+    """`only_strata` is what makes a stratum-local re-run possible without
+    pretending to be a full pass. Signature-level check: no key, no spend."""
+    signature = inspect.signature(sweep).parameters
+    assert "run_tag" in signature
+    assert "only_strata" in signature
+    assert signature["run_tag"].default == ""
+    assert signature["only_strata"].default is None
+
+
+def test_the_markdown_table_leads_with_the_comparable_denominator():
+    """The defect this fixes: the README published `pass_total/scored`, which is
+    each system's OWN denominator over rows the other systems did not all score.
+    `common` is computed and was not published. Both now appear, and the
+    comparable one is first."""
+    artifact = three_systems()
+    board = scoreboard(artifact)
+    table = markdown_table(board)
+    assert f"Overall (n={board['common']['n']})" in table
+    assert "Not comparable across systems" in table
+    # The per-stratum headers carry the caveat marker.
+    assert "Single-hop^" in table
+
+
+def test_every_per_system_column_in_the_table_is_marked_non_comparable():
+    """A reader must not be able to pick an unmarked column that is not
+    comparable. Every header except `System`, `Overall`, latency and cost is a
+    per-system denominator and carries the marker."""
+    board = scoreboard(three_systems())
+    header = markdown_table(board).splitlines()[0]
+    cells = [c.strip() for c in header.strip("|").split("|")]
+    exempt = {"System", "p95 latency", "$/query"}
+    for cell in cells:
+        if cell in exempt or cell.startswith("Overall"):
+            continue
+        assert cell.endswith("^"), f"{cell!r} is per-system and is not marked"

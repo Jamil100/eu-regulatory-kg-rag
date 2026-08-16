@@ -74,7 +74,25 @@ __all__ = [
 # Long enough for a two-part legal answer with a caveat, short enough that a
 # model padding out an evasion truncates and is caught. `finish_reason` is
 # carried either way -- see the note on MAX_TOKENS in `GenerationResult`.
-MAX_TOKENS = 800
+#
+# RAISED 800 -> 2000 (2026-08-16), FOR A MEASUREMENT REASON RATHER THAN A
+# QUALITY ONE.
+#
+# At 800 the cap was not catching evasions, it was truncating enumerations. Nine
+# rows across the four published arms hit `MAX_TOKENS`, five of them in
+# `aggregation` (ag-001, ag-004, ag-005, ag-009, ag-010) -- the stratum whose
+# correct answer IS long: Article 26 alone is ~1,138 tokens of source and its
+# gold list has 11 items. `scorable()` then drops every truncated row from the
+# denominator, so the cap was deleting the aggregation stratum's failures and
+# reporting the survivors. That is the opposite of catching them.
+#
+# 2000 is chosen to clear the longest legitimate answer on this eval set, not as
+# a general preference. The trade the original 800 was making is real -- a model
+# padding out an evasion has more room now -- so `finish_reason` is still carried
+# and the truncated-row count is still reported. If a future eval set has rows
+# whose correct answer is longer than this, raise it again and say so here;
+# do not treat a truncated enumeration as a failed one.
+MAX_TOKENS = 2000
 
 # THE PROMPT IS THE ONLY REFUSAL LEVER THIS PATH HAS.
 #

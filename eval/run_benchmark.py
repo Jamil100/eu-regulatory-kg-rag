@@ -201,6 +201,8 @@ def sweep(
     conn: Any | None = None,
     client: Any | None = None,
     grade: bool = True,
+    run_tag: str = "",
+    only_strata: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """One system over every eval row. The only part that spends.
 
@@ -213,6 +215,19 @@ def sweep(
     exhaust the tenacity budget, and an arm that dies halfway should not take the
     other two down. `attempts` is recorded per row so a rate-limited row is
     visible in the artifact rather than inferred from a bad score.
+
+    `run_tag` NAMES A REPETITION OF AN OTHERWISE IDENTICAL SWEEP.
+
+    Every other field in a row says what was *configured*. Two runs of the same
+    system on the same day are identical in all of them, so without a tag the
+    artifact cannot express "these are two samples of one configuration" and the
+    scoreboard's `system` grouping would silently pool them into one 200-row
+    arm. The tag is recorded and is otherwise inert: `scoreboard()` does not read
+    it, so a tagged sweep never joins the published table by accident.
+
+    `only_strata` restricts the sweep to named strata. A stratum-local re-run is
+    not a benchmark and must not be scored as one -- it is paired against the
+    same rows of a previous artifact and reported on its own.
     """
     if system not in SYSTEMS:
         raise BenchmarkError(f"{system!r} is not a system; have {sorted(SYSTEMS)}")
@@ -258,6 +273,9 @@ def sweep(
 
     passages = {} if live else replayed_passages(conn, field=spec["field"])
 
+    if only_strata:
+        rows = [r for r in rows if r["stratum"] in only_strata]
+
     out: list[dict] = []
     try:
         for row in rows:
@@ -265,6 +283,7 @@ def sweep(
             record: dict[str, Any] = {
                 "system": system,
                 "mode": "live" if live else "replay",
+                "run_tag": run_tag,
                 "id": row["id"],
                 "stratum": row["stratum"],
                 "gold_route": row.get("route"),
@@ -309,6 +328,8 @@ def sweep(
                 "finish_reason": result.finish_reason,
                 "attempts": result.attempts,
                 "regenerated": result.regenerated,
+                # E1's instrument. See `sweep(run_tag=...)`.
+                "request_sha": result.request_sha,
                 "cost_usd": result.cost_usd,
                 "latency_ms": round(result.latency_ms, 2),
                 "error": None,
@@ -447,6 +468,13 @@ def scoreboard(artifact: list[dict],
     the cost column. See reporting rule 1 in the module docstring.
     """
     retrieval = retrieval_costs() if retrieval is None else retrieval
+    # TAGGED ROWS ARE NOT THE BENCHMARK. A repeat sweep (`--run-tag`) or a
+    # stratum-local re-run appends rows that are identical in `system` and
+    # `mode` to the published ones, so grouping on those two alone would pool a
+    # repetition into the arm it was measuring and double its denominator. The
+    # published table is the untagged rows and nothing else; the repeats are
+    # read by their own reporters.
+    artifact = [r for r in artifact if not r.get("run_tag")]
     replay = [r for r in artifact if r.get("mode") == "replay"]
     live = [r for r in artifact if r.get("mode") == "live"]
     systems = [s for s in SYSTEM_ORDER if any(r["system"] == s for r in artifact)]
@@ -614,11 +642,30 @@ def markdown_table(board: dict[str, Any]) -> str:
 
     Cells are `n/N`, not bare percentages: at 5 rows a refusal stratum has no
     meaningful percentage and rounding one to "80%" hides the denominator.
+
+    THE HEADLINE COLUMN IS `common`, NOT `pass_total`.
+
+    `scoreboard()` has computed both since the arm was added, and this function
+    published the wrong one. Every per-system denominator is that system's own:
+    `scorable()` drops each arm's errored and MAX_TOKENS rows, those are
+    different rows in each arm, and the drop is not random -- 16 of the 20 rows
+    dropped across the four arms were `wrong` or `partially_correct`, and they
+    cluster in `aggregation`, whose long answers are the ones that truncate. So
+    the per-system column silently deletes each arm's own hardest failures and
+    then invites a reader to compare the results across arms.
+
+    Both are now printed. `Overall` is the comparable figure over the rows every
+    arm scored; `Own` is retained beside it, labelled, because dropping it would
+    hide that the arms disagree about which rows are scorable at all -- and that
+    disagreement is itself a finding. The per-stratum cells remain per-system
+    denominators and are marked with a dagger for the same reason.
     """
     headline = ("single-hop", "two-hop", "three-hop", "cross-regulation", "aggregation")
+    common_n = board["common"]["n"]
     lines = [
-        "| System | Single-hop | Two-hop | Three-hop | Cross-reg | Aggregation | Refusal* | p95 latency | $/query |",
-        "|---|---|---|---|---|---|---|---|---|",
+        f"| System | Overall (n={common_n}) | Own^ | Single-hop^ | Two-hop^ | "
+        f"Three-hop^ | Cross-reg^ | Aggregation^ | Refusal*^ | p95 latency | $/query |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for system in board["systems"]:
         cell = board[system]
@@ -646,8 +693,10 @@ def markdown_table(board: dict[str, Any]) -> str:
             # that a live request does not have, and an unmarked row would read
             # as a deployable system.
             label = f"{label} [ceiling]"
+        common = f"**{cell['common_pass']}/{common_n}**"
+        own = f"{cell['pass_total']}/{cell['scored']}"
         lines.append(
-            f"| {label} | " + " | ".join(cells)
+            f"| {label} | {common} | {own} | " + " | ".join(cells)
             + f" | {refusal_pass}/{refusal_n} | {p95} | {cost} |"
         )
 
@@ -665,7 +714,22 @@ def markdown_table(board: dict[str, Any]) -> str:
             f"{gap} The adopted rules router scores 70/99 on this set.",
         ]
 
+    excluded = board["common"]["excluded"]
     lines += [
+        "",
+        f"^**Not comparable across systems.** These columns use each system's own "
+        f"denominator. `scorable()` drops that system's errored, MAX_TOKENS and "
+        f"canary rows, and they are *different rows in each system*, so the "
+        f"denominators differ ("
+        + ", ".join(
+            f"{board['labels'][s]} {board[s]['scored']}" for s in board["systems"]
+        )
+        + f"). The drop is quality-correlated -- truncation hits the longest "
+        f"answers, which are concentrated in `aggregation` -- so each of these "
+        f"cells is biased upward by an unknown amount. **Overall** is the only "
+        f"column that compares: it is the {board['common']['n']} rows every "
+        f"system scored"
+        + (f", excluding {', '.join(excluded)}." if excluded else "."),
         "",
         "\\*Refusal is three behaviours with three different correct outputs, and is "
         "never averaged into one number. Broken out:",
@@ -799,6 +863,17 @@ def main() -> int:
         help="live pass only: measure latency on a deterministic stratified subset "
              "of N rows instead of all 100. $/query is derived and needs no live row.",
     )
+    parser.add_argument(
+        "--run-tag", default="",
+        help="name this sweep as a REPETITION rather than the benchmark. Tagged rows "
+             "are appended beside the published ones, are keyed separately, and are "
+             "ignored by scoreboard(). Use for repeat runs (E1) and stratum re-runs.",
+    )
+    parser.add_argument(
+        "--stratum", action="append", choices=sorted(STRATUM_ORDER), default=None,
+        help="restrict the sweep to this stratum (repeatable). Requires --run-tag: a "
+             "partial sweep is not the benchmark and must not overwrite it.",
+    )
     parser.add_argument("--markdown", action="store_true", help="print only the README table")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -809,15 +884,39 @@ def main() -> int:
     if args.refresh:
         if not args.system:
             parser.error("--refresh needs --system (one system per invocation; see the docstring)")
+        if args.stratum and not args.run_tag:
+            parser.error(
+                "--stratum requires --run-tag: a stratum-local sweep covers a subset of "
+                "the rows and would otherwise replace the full published pass for this "
+                "system with a partial one"
+            )
         mode = "live" if args.live else "replay"
         questions = load_questions()
         if args.live and args.sample:
             questions = live_sample(questions, args.sample)
-        print(f"sweeping {args.system!r} over {len(questions)} rows ({mode})", file=sys.stderr)
-        fresh = sweep(questions, args.system, live=args.live)
+        strata = tuple(args.stratum) if args.stratum else None
+        if strata:
+            questions = [q for q in questions if q["stratum"] in strata]
+        print(
+            f"sweeping {args.system!r} over {len(questions)} rows ({mode})"
+            + (f" tag={args.run_tag!r}" if args.run_tag else "")
+            + (f" strata={list(strata)}" if strata else ""),
+            file=sys.stderr,
+        )
+        fresh = sweep(
+            questions, args.system, live=args.live,
+            run_tag=args.run_tag, only_strata=strata,
+        )
+        # The replace key includes `run_tag`, so a tagged sweep replaces only its
+        # own previous rows and never the published untagged pass. Without this a
+        # repeat run would delete the very rows it is being compared against.
         existing = [
             row for row in (load_artifact() if ARTIFACT.exists() else [])
-            if not (row.get("system") == args.system and row.get("mode") == mode)
+            if not (
+                row.get("system") == args.system
+                and row.get("mode") == mode
+                and (row.get("run_tag") or "") == args.run_tag
+            )
         ]
         ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         ARTIFACT.write_text(
