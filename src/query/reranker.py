@@ -316,6 +316,9 @@ def sweep(
     embed_ms = (time.perf_counter() - started) * 1000 / len(rows)
     tokens_each = embed_tokens / len(rows)
 
+    from src.query.lexical import LEXICAL_DEPTH
+    from src.query.retriever import retrieve_pool_detailed
+
     out: list[dict] = []
     try:
         for row, vector in zip(rows, vectors, strict=True):
@@ -324,6 +327,22 @@ def sweep(
             )
             reranked = rerank_detailed(
                 row["question"], retrieved.docs, top_n=CANDIDATES, client=client
+            )
+            # The lexical-union arm, swept beside the vector-only one rather than
+            # in place of it. Both orderings in one artifact is what lets the
+            # end-to-end comparison replay two arms from a single sweep, and it
+            # is the same reasoning that put `retrieved` next to `reranked`: an
+            # arm you cannot replay is an arm you pay to re-measure.
+            #
+            # The vector half is NOT re-drawn -- `vector=` reuses the identical
+            # embedding, so the two pools differ only by the lexical union and a
+            # difference between the arms cannot be a different vector draw.
+            pooled = retrieve_pool_detailed(
+                row["question"], CANDIDATES, dim=DIM, conn=conn, vector=vector,
+                lexical_depth=LEXICAL_DEPTH,
+            )
+            pool_reranked = rerank_detailed(
+                row["question"], pooled.docs, top_n=len(pooled.docs), client=client
             )
             out.append({
                 "id": row["id"],
@@ -337,6 +356,19 @@ def sweep(
                 "retrieved_scores": [round(d.score, 6) for d in retrieved.docs],
                 "reranked": [d.chunk_id for d in reranked.docs],
                 "rerank_scores": [round(d.score, 6) for d in reranked.docs],
+                # The lexical-union arm. `pool` is the enlarged candidate set in
+                # retrieval order (vector draw first, then lexical-only);
+                # `pool_reranked` is that set ordered by the cross-encoder.
+                "pool": [d.chunk_id for d in pooled.docs],
+                "pool_size": len(pooled.docs),
+                "lexical_added": pooled.lexical_added,
+                "lexical_depth": LEXICAL_DEPTH,
+                "pool_reranked": [d.chunk_id for d in pool_reranked.docs],
+                "pool_rerank_scores": [round(d.score, 6) for d in pool_reranked.docs],
+                "pool_documents_sent": pool_reranked.documents_sent,
+                "pool_search_units": pool_reranked.search_units,
+                "pool_rerank_cost_usd": pool_reranked.cost_usd,
+                "lexical_ms": round(pooled.lexical_ms, 2),
                 # Amortised: the sweep embeds all questions in one batched call,
                 # so there is no per-question token count or round trip to
                 # report. The batch total divided by the row count is the honest
@@ -353,6 +385,11 @@ def sweep(
                     "embed": round(embed_ms, 2),
                     "search": round(retrieved.search_ms, 2),
                     "rerank": round(reranked.latency_ms, 2),
+                    # Kept as separate keys, not folded into the two above: the
+                    # union arm's rerank sends ~2x the documents and its latency
+                    # is the cost of the +19 gold, which a merged figure hides.
+                    "lexical": round(pooled.lexical_ms, 2),
+                    "pool_rerank": round(pool_reranked.latency_ms, 2),
                 },
             })
     finally:
@@ -393,6 +430,34 @@ def scoreboard(artifact: list[dict]) -> dict[str, Any]:
             out[f"oracle@{k}"] = sum(
                 min(_found(r["retrieved"], r["gold"], r["candidates"]), k) for r in rows
             )
+
+        # Where the gold that never reaches the prompt is lost. Three disjoint
+        # causes that sum exactly to `gold - post@k`, separated because the fix
+        # for each is a different piece of the system and "recall@5 is 49%" hides
+        # which one is actually binding:
+        #
+        #   retrieval_loss  gold that is not in the candidate pool at all. No
+        #                   reranker and no cap can reach it. Only embedding,
+        #                   chunking or a wider pool moves this.
+        #   cap_loss@k      gold that IS in the pool but cannot fit in k slots
+        #                   even under a perfect ordering. Only raising k moves
+        #                   this.
+        #   order_loss@k    gold that is in the pool and would fit, but the
+        #                   reranker placed non-gold above it. Only a better
+        #                   ranker moves this.
+        #
+        # Measured 2026-08-16 at k=5: 46 / 6 / 51. The ordering term is 8.5x the
+        # cap term, and the cap term is zero on every stratum except aggregation.
+        # That is the reason raising PASSAGE_TOP_N is not the fix, and it is the
+        # kind of claim that has to be recomputed on every refresh rather than
+        # quoted from a doc -- hence a derived line here and not a note.
+        out["pool"] = sum(
+            _found(r["retrieved"], r["gold"], r["candidates"]) for r in rows
+        )
+        out["retrieval_loss"] = gold - out["pool"]
+        for k in (5, 10):
+            out[f"cap_loss@{k}"] = out["pool"] - out[f"oracle@{k}"]
+            out[f"order_loss@{k}"] = out[f"oracle@{k}"] - out[f"post@{k}"]
         return out
 
     strata: dict[str, list[dict]] = collections.defaultdict(list)
@@ -493,6 +558,24 @@ def _report(artifact: list[dict]) -> int:
             f"{s['pre@10']:>4}/{s['gold']:<2} {s['post@10']:>4}/{s['gold']:<2} {s['delta@10']:>+4d}   "
             f"{s['cap@5']:>5} {s['cap@10']:>6} {s['oracle@10']:>6}"
         )
+
+    # The same shortfall the table above shows as one number, split by cause.
+    # Printed per stratum because the split is not uniform: the cap term is zero
+    # everywhere except aggregation, so a corpus-wide "the cap is tight" reading
+    # of the overall row would be wrong on five of six strata.
+    print(f"\nwhere the gold goes, k=5 (retrieval + cap + ordering = {total} - post@5):")
+    print(f"  {'stratum':<17} {'gold':>4} {'not retrieved':>14} {'over cap':>9} "
+          f"{'mis-ordered':>12} {'reached':>8}")
+    for name, s in sorted(board["strata"].items(),
+                          key=lambda kv: -kv[1]["order_loss@5"]):
+        print(f"  {name:<17} {s['gold']:>4} {s['retrieval_loss']:>14} "
+              f"{s['cap_loss@5']:>9} {s['order_loss@5']:>12} {s['post@5']:>8}")
+    print(f"  {'ALL':<17} {overall['gold']:>4} {overall['retrieval_loss']:>14} "
+          f"{overall['cap_loss@5']:>9} {overall['order_loss@5']:>12} "
+          f"{overall['post@5']:>8}")
+    if overall["cap_loss@5"] and overall["order_loss@5"] > overall["cap_loss@5"]:
+        print(f"  ordering costs {overall['order_loss@5'] / overall['cap_loss@5']:.1f}x "
+              "what the cap costs: raising k moves the smaller term.")
 
     print("\nlatency by component, ms (p50 / p95) -- reported separately because "
           "vector-index.md's\n6.68 ms is SQL only and never included the embedding "

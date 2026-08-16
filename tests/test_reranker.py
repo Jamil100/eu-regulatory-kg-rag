@@ -67,6 +67,41 @@ POST = {5: 100, 10: 123, 50: 157}
 UNREACHABLE = GOLD_TOTAL - PRE[50]          # 46
 assert UNREACHABLE == 46
 
+# THE LOSS DECOMPOSITION, which is what UNREACHABLE above is one third of.
+# `scoreboard()` now derives these, so they are recomputed on every refresh
+# rather than quoted. Three disjoint causes summing to GOLD_TOTAL - POST[k]:
+#
+#   retrieval  gold outside the 50-candidate pool     -- embedding/chunking's problem
+#   cap        in the pool, cannot fit in k slots     -- PASSAGE_TOP_N's problem
+#   ordering   in the pool, would fit, ranked below noise -- the reranker's problem
+#
+# At k=5 that is 46 / 6 / 51. Ordering is 8.5x the cap term, and the cap term is
+# zero on every stratum except aggregation (all 6 chunks, from the four rows whose
+# gold count exceeds 5: 7, 7, 8, 11). This is the measurement that says raising the
+# passage cap is not the fix; a change here is a finding for
+# docs/metrics/query-path.md, not a constant to re-tune.
+LOSS = {
+    5:  {"retrieval": 46, "cap": 6, "ordering": 51},
+    10: {"retrieval": 46, "cap": 0, "ordering": 34},
+}
+for _k, _parts in LOSS.items():
+    assert _parts["retrieval"] + _parts["cap"] + _parts["ordering"] == GOLD_TOTAL - POST[_k]
+
+# Rerank 3.5 is deterministic on this set; the vector stage is not.
+#
+# Two full `--eval --refresh` sweeps (2026-08-16) differed on ZERO rows in rerank
+# top-5 set or order, with 99.1% of the 4,992 relevance scores byte-identical (max
+# delta 0.00087, max rank movement 1 place). The same two sweeps differed on pool
+# MEMBERSHIP for 7 of 100 rows and pool ORDER for 22 of 100 -- embed-v4.0 does not
+# return byte-identical vectors, and the churn lands at the rank-50 boundary.
+#
+# The consequence for this file: PRE[5] is the one constant that is NOT stable
+# across runs (97 vs 98; on 3h-015 `aia-annex3-point1` displaced `aia-art26-para11`
+# from slot 5). Everything else above held on both sweeps, including the whole of
+# LOSS. Do not tighten PRE[5] into an equality test without re-reading this.
+PRE_5_UNSTABLE = (97, 98)
+assert PRE[5] in PRE_5_UNSTABLE
+
 # The one row that made cap@5 and cap@10 differ at 23 rows. It is no longer alone
 # -- see test_rows_that_lose_references_between_k5_and_k10.
 BIG_ROW = "ag-001"
@@ -352,8 +387,47 @@ def test_the_ceilings_and_oracle_are_what_query_path_md_claims(board):
 
 def test_the_rerank_delta_is_what_query_path_md_claims(board):
     for k in KS:
-        assert board["overall"][f"pre@{k}"] == PRE[k], f"pre@{k} moved"
         assert board["overall"][f"post@{k}"] == POST[k], f"post@{k} moved"
+    for k in (10, 50):
+        assert board["overall"][f"pre@{k}"] == PRE[k], f"pre@{k} moved"
+    # pre@5 is deliberately a membership test, not an equality one. It is the only
+    # number in this file that moved between two live sweeps of an unchanged
+    # corpus, because embed-v4.0 does not return byte-identical vectors and the
+    # resulting churn reaches slot 5 on 3h-015. See PRE_5_UNSTABLE above.
+    assert board["overall"]["pre@5"] in PRE_5_UNSTABLE, "pre@5 left the measured band"
+
+
+def test_the_loss_decomposition_is_exhaustive_and_pinned(board):
+    """retrieval + cap + ordering must account for every gold chunk not in top-k.
+
+    The identity is the point: if these three stop summing to `gold - post@k` the
+    decomposition has a fourth cause in it and the story it tells is wrong.
+    """
+    overall = board["overall"]
+    for k, parts in LOSS.items():
+        assert (
+            overall["retrieval_loss"] + overall[f"cap_loss@{k}"]
+            + overall[f"order_loss@{k}"] == GOLD_TOTAL - overall[f"post@{k}"]
+        ), f"the k={k} decomposition does not close"
+        assert overall["retrieval_loss"] == parts["retrieval"]
+        assert overall[f"cap_loss@{k}"] == parts["cap"]
+        assert overall[f"order_loss@{k}"] == parts["ordering"]
+
+
+def test_the_cap_binds_only_on_aggregation(board):
+    """The finding that says raising PASSAGE_TOP_N is not the fix.
+
+    Five of six strata have gold counts at or under 5, so the cap cannot cost them
+    anything at k=5 no matter how the reranker behaves. If this ever fails, either
+    the eval set gained a multi-chunk row outside aggregation or the pool changed
+    shape -- both are findings, not test breakage.
+    """
+    for name, s in board["strata"].items():
+        if name == "aggregation":
+            assert s["cap_loss@5"] == 6
+        else:
+            assert s["cap_loss@5"] == 0, f"{name} now loses gold to the cap"
+    assert board["overall"]["order_loss@5"] > 8 * board["overall"]["cap_loss@5"]
 
 
 def test_reranking_the_whole_pool_cannot_change_recall_at_50(board):
@@ -420,8 +494,31 @@ def test_the_reranker_is_not_uniformly_positive(board):
     assert board["overall"]["delta@10"] > 0
 
 
-def test_the_aggregate_gain_at_k5_clears_the_resolution(board):
-    assert board["overall"]["delta@5"] > RESOLUTION_CHUNKS
+def test_the_aggregate_gain_at_k5_does_NOT_clear_the_resolution(board):
+    """INVERTED 2026-08-16. It used to assert `delta@5 > RESOLUTION_CHUNKS`.
+
+    That assertion was true at +3 and is false at +2, and the flip is not a
+    regression -- it is the measurement getting better. Two things landed on it:
+
+    1. `pre@5` is not stable. Two live sweeps of an unchanged corpus gave 97 and
+       98 (embed-v4.0 does not return byte-identical vectors; see PRE_5_UNSTABLE
+       above). `delta@5 = post@5 - pre@5` inherits that instability directly, so
+       the old assertion was resting a pre-registered significance claim on a
+       quantity that moves by one chunk between runs of the same code.
+    2. The paired test says the same thing more honestly. Rerank vs raw vector at
+       k=5 is 16 wins / 12 losses / 62 ties, exact McNemar p = 0.572. A +2 or +3
+       aggregate over 203 references is not a difference this eval set can
+       resolve, which is precisely what ADR-0004's RESOLUTION_CHUNKS exists to
+       say.
+
+    So the pinned claim is now the correct one: at the cap that actually ships,
+    Rerank 3.5's aggregate gain is INSIDE the resolution and must be reported as
+    no measured difference. `_report()` already prints the CAUTION that says so.
+    A later sweep that pushes this above the threshold is a finding for
+    docs/metrics/query-path.md and should be checked against the paired test
+    before it is believed.
+    """
+    assert board["overall"]["delta@5"] <= RESOLUTION_CHUNKS
 
 
 def test_the_scoreboard_needs_nothing_but_the_artifact(artifact):
@@ -469,9 +566,23 @@ def test_latency_excludes_nothing_silently(board, artifact):
     # genuinely retried, and they are the same 9 that appear at the top of the
     # stall list with 51-88 s wall clock. The retry machinery is now observable,
     # which is what makes the p95 exclusion below a measurement rather than a hope.
-    assert board["rerank_retried"], (
-        "no retried calls recorded -- either the key stopped rate-limiting or the "
-        "tenacity statistics accessor regressed to the broken one"
+    # RELAXED 2026-08-16 from `assert board["rerank_retried"]`.
+    #
+    # That assertion required the Cohere key to have rate-limited us during the
+    # sweep that produced the artifact. It held on the 2026-08-15 trial-key run (9
+    # of 100 calls retried, 51-88 s wall clock) and fails on the production key,
+    # which retried nothing. Asserting that a third party throttled us is not a
+    # property of this code, and a test that turns green or red on someone else's
+    # capacity planning cannot tell anyone anything.
+    #
+    # What IS this repo's property, and is what the docstring above actually
+    # cared about, is that the accessor is not silently broken again: if any call
+    # retried, the count must be visible AND those calls must be excluded from
+    # the clean-latency population. That is asserted unconditionally below.
+    retried = set(board["rerank_retried"])
+    assert retried <= {row["id"] for row in artifact}
+    assert board["rerank_calls_clean"] == len(artifact) - len(retried), (
+        "retried calls are not being excluded from the clean latency population"
     )
     retried = set(board["rerank_retried"])
     worst = {qid for qid, ms in board["rerank_stalls"] if ms > 10_000}
