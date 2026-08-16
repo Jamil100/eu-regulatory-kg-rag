@@ -223,9 +223,22 @@ def build_messages(question: str) -> list[dict[str, str]]:
 
 
 def _chat_call(
-    client: Any, messages: list[dict], documents: list[dict]
+    client: Any, messages: list[dict], documents: list[dict],
+    max_tokens: int = MAX_TOKENS,
 ) -> tuple[Any, int, str]:
     """The retrying unit, mirroring `template_selector._chat_call`.
+
+    `max_tokens` is a parameter rather than a constant read because
+    `decompose.extract_record` needs a much smaller cap: it asks for two short
+    strings and a boolean, and the 2000 that an answer needs would only give a
+    confused extraction room to write an essay into a field about to be
+    concatenated into the answer. It defaults to `MAX_TOKENS`, so every existing
+    caller sends a byte-identical body and `request_sha` is unchanged for them.
+
+    An empty `documents` list is omitted from the body rather than sent. The
+    extraction call has no grounding documents -- it puts the single paragraph in
+    the user turn -- and `documents: []` alongside `citation_options` is a
+    request for citations over nothing.
 
     **This is the third new chat call site in three steps, and the first two both
     shipped without a retry and were both bitten** -- Step 4's reranker died
@@ -259,7 +272,7 @@ def _chat_call(
     body: dict[str, Any] = dict(
         model=settings.model_generate,
         messages=messages,
-        documents=documents,
+        **({"documents": documents} if documents else {}),
         # Explicit, not defaulted. `citation_options.mode` defaults to
         # "enabled" and Cohere may move what that resolves to; a default that
         # changes upstream silently re-measures this whole step. Same reason
@@ -280,7 +293,7 @@ def _chat_call(
         citation_options={"mode": "ENABLED"},
         temperature=0,
         seed=42,
-        max_tokens=MAX_TOKENS,
+        max_tokens=max_tokens,
         # Deliberately absent:
         #   response_format -- JSON mode lands citation spans on braces and
         #     field names rather than on prose, which breaks `span_defects`.
