@@ -11,14 +11,29 @@ built expecting.
 
 Cells are `answers judged correct / rows scored`, over a 100-question stratified
 eval set. Graded by an LLM judge (Command A, temperature 0) that agrees with a
-hand-graded 20% sample **17 of 20 times (85%)**.
+hand-graded 20% sample **17 of 20 times (85%)**, and **19 of 20 (95%) on the
+pass/fail bit the accuracy columns are computed from**.
 
-| System | Single-hop | Two-hop | Three-hop | Cross-reg | Aggregation | Refusal* | p95 latency | $/query |
-|---|---|---|---|---|---|---|---|---|
-| Vector-only | 16/20 | 9/20 | 0/13 | 3/15 | 0/9 | 11/20 | 9.8 s (n=30) | $0.0041 |
-| Vector + Rerank 3.5 | 14/19 | 6/20 | 1/14 | 5/15 | 2/7 | 12/19 | 19.2 s (n=30) | $0.0065 |
-| **Hybrid (graph+vector)** | 15/20 | 5/20 | 1/14 | 5/15 | 1/7 | 8/20 | 10.9 s (n=30) | $0.0076 |
-| Hybrid, gold route [ceiling] | 15/19 | 4/20 | 2/14 | 4/14 | 1/7 | 7/19 | – | – |
+> **Read the noise floor first.** Running the *same system twice*, with
+> byte-identical request bodies (SHA-256 verified) at `temperature=0, seed=42`,
+> changes the answer text on **55.6%** of rows and flips the pass/fail bit on
+> **7.1%**. That puts a **±5.2pp 95% band on every single-run cell below** —
+> wider than the entire spread between the four systems. `command-a-03-2025`
+> does not honour `seed`. See [Measurement integrity](#measurement-integrity).
+
+| System | Overall (n=89) | Own^ | Single-hop^ | Two-hop^ | Three-hop^ | Cross-reg^ | Aggregation^ | Refusal*^ | p95 latency | $/query |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Vector-only | **35/89** | 39/97 | 16/20 | 9/20 | 0/13 | 3/15 | 0/9 | 11/20 | 9.8 s (n=30) | $0.0041 |
+| Vector + Rerank 3.5 | **37/89** | 40/94 | 14/19 | 6/20 | 1/14 | 5/15 | 2/7 | 12/19 | 19.2 s (n=30) | $0.0065 |
+| **Hybrid (graph+vector)** | **31/89** | 35/96 | 15/20 | 5/20 | 1/14 | 5/15 | 1/7 | 8/20 | 10.9 s (n=30) | $0.0076 |
+| Hybrid, gold route [ceiling] | **30/89** | 33/93 | 15/19 | 4/20 | 2/14 | 4/14 | 1/7 | 7/19 | – | – |
+
+`Overall` is the only column that compares across systems: it is the 89 rows
+every system scored. `^` columns use each system's **own** denominator — each
+arm drops its own errored and `MAX_TOKENS` rows, and those are different rows in
+each arm — so they are not comparable to each other. That drop is
+quality-correlated: 16 of the 20 rows excluded across the four arms were `wrong`
+or `partially_correct`, so each `^` cell is biased upward by an unknown amount.
 
 `[ceiling]` is not a deployable system: it replays the eval set's hand-verified
 route labels, which a live request does not have. **The gap to it is −1 answer**,
@@ -35,6 +50,52 @@ averaged into one number:
 | Hybrid (graph+vector) | 2/5 | 2/5 | 4/10 |
 | Hybrid, gold route | 1/5 | 2/5 | 4/9 |
 
+Refusal is also **the noisiest stratum in the set**: two runs of the same system
+flip the pass/fail bit on **5 of these 20 rows (25%)**. The 3-answer gap between
+`Vector-only` (11/20) and `Hybrid` (8/20) is inside that band and is **not a
+measurable difference**.
+
+## Measurement integrity
+
+Two properties of the harness were measured rather than assumed, because both
+change how the table above may be read.
+
+**1. Generation is nondeterministic, and it is the provider.** `rerank` was swept
+twice over all 100 rows with no code change between them. `generate._chat_call`
+builds the request body once, hashes that exact object, and splats it into
+`client.chat`, so the digest cannot drift from what was sent.
+
+| | |
+|---|---|
+| request bodies identical (SHA-256) | **98 / 98** comparable rows |
+| answer text differs | **55 / 99 (55.6%)** |
+| pass/fail bit differs | **7 / 99 (7.1%)** |
+| implied 95% band on a single-run cell | **±5.2pp** |
+
+Every comparable row sent a byte-identical body and 56% returned different text
+anyway, so this is not a context-assembly defect — `temperature=0` and `seed=42`
+do not make `command-a-03-2025` deterministic. Nothing in this repository can
+remove it. It is a floor under every published difference and is quoted beside
+them. Reproduce with `python -m eval.repeat_report --tags e1-run-a e1-run-b`.
+
+**2. The `MAX_TOKENS` cap was deleting the aggregation stratum's failures.** At
+`max_tokens=800`, nine rows across the four arms truncated, five of them in
+`aggregation` — the stratum whose correct answer *is* long. `scorable()` drops
+truncated rows, so those denominators fell to 7 while the numerators did not.
+Re-run at 2000:
+
+| System | truncated 800 → 2000 | published | corrected (n=10) |
+|---|---|---|---|
+| Vector-only | 1 → **0** | 0/9 | **0/10** |
+| Vector + Rerank 3.5 | 3 → **0** | 2/7 | **2/10** |
+| Hybrid (graph+vector) | 3 → **0** | 1/7 | **1/10** |
+| Hybrid, gold route | 3 → **0** | 1/7 | **1/10** |
+
+**No truncated row was hiding a correct answer** — every one kept its verdict and
+merely finished, and no row leaked `<co>` citation markup at the higher cap
+(which [`answer-path.md`](docs/metrics/answer-path.md) flagged as the risk). The
+cap was suppressing the denominator, not the score. `MAX_TOKENS` is now 2000.
+
 **The number that explains the table is not in it:** `partially_correct` is
 42–46% of answers for *every* system. Only `correct` counts as a pass, so nearly
 half the mass sits in one excluded bucket identically across all four arms, and
@@ -50,7 +111,9 @@ Three measured facts constrain how much of this the architecture can be blamed f
 - **The adopted graph budget retains 20 of the 61 reachable gold chunks.**
   The hybrid enters the benchmark having already discarded two-thirds of what its
   own graph path found ([ADR-0014](docs/adr/adr-0014-graph-statement-budget.md)).
-- **The three systems agree far more than they differ.** 40% / 43% / 36% correct.
+- **The three systems agree far more than they differ.** On the comparable
+  denominator, 39% / 42% / 35% correct — a 7-answer best-to-worst spread against
+  a ±2.7pp run-to-run standard deviation.
 
 Reproduce, with no API key and no containers:
 
