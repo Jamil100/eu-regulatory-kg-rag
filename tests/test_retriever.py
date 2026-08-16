@@ -454,6 +454,84 @@ def test_the_pool_has_no_duplicates(indexed):
     assert len(ids) == len(set(ids))
 
 
+# --------------------------------------------------------------------------
+# Enumeration: every limb of one provision, in statutory order
+# --------------------------------------------------------------------------
+
+def test_an_article_enumerates_in_statutory_order(indexed):
+    """The ordering is the legislation's, not a measured one. That is the whole
+    point: the measured orderings are what fail on this stratum."""
+    from src.query.retriever import retrieve_by_article
+
+    docs = retrieve_by_article("AIA", 26, conn=indexed)
+    assert [d.chunk_id for d in docs] == [f"aia-art26-para{n}" for n in range(1, 13)]
+    assert [d.citation_label for d in docs[:3]] == [
+        "AIA Art. 26(1)", "AIA Art. 26(2)", "AIA Art. 26(3)"
+    ]
+
+
+def test_an_annex_enumerates_by_point(indexed):
+    from src.query.retriever import retrieve_by_annex
+
+    docs = retrieve_by_annex("AIA", "III", conn=indexed)
+    assert [d.chunk_id for d in docs] == [f"aia-annex3-point{n}" for n in range(1, 9)]
+
+
+def test_enumerated_docs_carry_no_score(indexed):
+    """Statutory order is not a relevance scale. A float here would be sortable
+    against cosine and rerank scores, which is the defect `retriever`'s module
+    docstring forbids."""
+    from src.query.retriever import retrieve_by_article
+
+    assert all(d.score is None for d in retrieve_by_article("AIA", 99, conn=indexed))
+
+
+def test_an_article_larger_than_the_bound_is_refused_whole(indexed):
+    """`aia-art3` is the definitions article at 68 paragraphs.
+
+    Refused rather than truncated: half of Article 3 is not "the definitions", it
+    is an arbitrary prefix that reads as complete, and an answer built on it
+    would be confidently partial. Returning [] lets the caller fall back to
+    ranking, which is a correct outcome.
+    """
+    from src.query.retriever import MAX_ENUMERATION, retrieve_by_article
+
+    assert indexed.execute(
+        "SELECT count(*) FROM chunks WHERE regulation='AIA' AND article=3"
+    ).fetchone()[0] > MAX_ENUMERATION
+    assert retrieve_by_article("AIA", 3, conn=indexed) == []
+
+
+def test_a_missing_provision_returns_empty_rather_than_raising(indexed):
+    """A detector guessing a target from a question will guess wrong sometimes,
+    and the fallback -- ordinary retrieval -- is already correct."""
+    from src.query.retriever import retrieve_by_annex, retrieve_by_article
+
+    assert retrieve_by_article("AIA", 9999, conn=indexed) == []
+    assert retrieve_by_annex("GDPR", "XIV", conn=indexed) == []
+
+
+def test_enumeration_needs_exactly_one_locator(indexed):
+    from src.query.retriever import RetrieverError, enumerate_provision
+
+    with pytest.raises(RetrieverError):
+        enumerate_provision("AIA", conn=indexed)
+    with pytest.raises(RetrieverError):
+        enumerate_provision("AIA", article=6, annex="III", conn=indexed)
+
+
+def test_the_enumeration_index_exists(indexed):
+    """schema.sql:31-33 were columns with no index until the enumeration path
+    needed them. A locator lookup by primary structure should not depend on
+    corpus size, whatever the planner does at 1,108 rows."""
+    names = {
+        r[0] for r in indexed.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'chunks'"
+        ).fetchall()
+    }
+    assert {"chunks_article", "chunks_annex"} <= names
+
+
 def test_the_union_is_measured_but_off_in_the_live_path():
     """THE ADOPTION SWITCH, pinned so that turning it on is a deliberate edit.
 

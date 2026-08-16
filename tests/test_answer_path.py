@@ -805,3 +805,68 @@ def test_attempts_is_recorded_per_row_so_a_rate_limited_row_is_visible(artifact)
         if row.get("budget") == PREREG_KEY or row.get("error"):
             continue
         assert isinstance(row.get("attempts"), int) and row["attempts"] >= 1
+
+
+# --------------------------------------------------------------------------
+# Enumeration (2026-08-16)
+# --------------------------------------------------------------------------
+
+def _doc(chunk_id: str, score: float | None = 0.5):
+    from src.schemas import ContextDoc
+
+    return ContextDoc(chunk_id=chunk_id, text="t", citation_label=chunk_id,
+                      source="PASSAGE", score=score)
+
+
+def test_the_vote_picks_the_modal_article():
+    from src.answer.answer_path import _vote_target
+
+    docs = [_doc("aia-art26-para1", 0.9), _doc("aia-art26-para5", 0.8),
+            _doc("aia-art27-para1", 0.7)]
+    assert _vote_target(docs) == ("AIA", {"article": 26})
+
+
+def test_the_vote_breaks_ties_on_score_not_on_order():
+    """One-all is the common case at the tail of a pool, and resolving it by
+    list position would make the target depend on a sort this function does not
+    own."""
+    from src.answer.answer_path import _vote_target
+
+    assert _vote_target([_doc("gdpr-art13-para1", 0.4),
+                         _doc("gdpr-art14-para1", 0.9)]) == ("GDPR", {"article": 14})
+
+
+def test_the_vote_reads_annexes_as_roman_numerals():
+    from src.answer.answer_path import _vote_target
+
+    assert _vote_target([_doc("aia-annex3-point1"),
+                         _doc("aia-annex3-point2")]) == ("AIA", {"annex": "III"})
+
+
+def test_enumeration_augments_and_never_drops_a_ranked_passage(indexed):
+    """AUGMENT, NOT REPLACE -- the property that makes a false positive cheap.
+
+    Replacing the top-5 with the enumeration reaches 23 of 48 aggregation gold;
+    keeping both reaches 27, and no row can lose gold it already had. Three rows
+    are worse under replacement because the voted article is not always where the
+    gold is.
+    """
+    from src.answer.answer_path import _with_enumeration
+
+    ranked = [_doc("gdpr-art5-para1"), _doc("aia-art26-para1")]
+    out = _with_enumeration(ranked, ranked, ("AIA", {"article": 26}), conn=indexed)
+    ids = [d.chunk_id for d in out]
+    assert "gdpr-art5-para1" in ids, "a ranked passage was dropped"
+    assert len(ids) == len(set(ids)), "the enumeration duplicated a ranked passage"
+    assert ids[0].startswith("aia-art26"), "the provision must lead"
+    assert len(out) > len(ranked)
+
+
+def test_a_refused_enumeration_leaves_the_ranking_alone(indexed):
+    """Article 3 is over `MAX_ENUMERATION`; a missing article does not exist.
+    Both fall back to what the reranker chose rather than degrading it."""
+    from src.answer.answer_path import _with_enumeration
+
+    ranked = [_doc("aia-art9-para1")]
+    assert _with_enumeration(ranked, ranked, ("AIA", {"article": 3}), conn=indexed) == ranked
+    assert _with_enumeration(ranked, ranked, ("AIA", {"article": 9999}), conn=indexed) == ranked

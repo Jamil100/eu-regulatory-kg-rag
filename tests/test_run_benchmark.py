@@ -277,6 +277,11 @@ def test_every_system_in_the_table_is_one_the_roadmap_names_or_a_marked_ceiling(
         # `answer_path.LEXICAL_DEPTH_LIVE` is the switch -- so it must not be
         # quietly exempt from the checks the other deployable arms get.
         "rerank-pool",
+        # Added 2026-08-16. `rerank` plus, on the questions the enumeration
+        # detector flags, every limb of one provision in statutory order. Named
+        # here for the same reason as `rerank-pool`: it is deployable, so it must
+        # not be exempt from the checks the other deployable arms get.
+        "rerank-enum",
     }
     assert SYSTEMS["vector"]["field"] == "retrieved", "vector-only replays the pre-rerank draw"
     assert SYSTEMS["rerank"]["field"] == "reranked"

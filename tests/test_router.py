@@ -364,3 +364,91 @@ def test_route_does_not_write_to_the_real_log_when_asked_not_to():
     """`/ask` (Step 7) needs to be able to route without logging -- in a test, or in
     a dry run -- without reaching for the module-level path."""
     assert router.route("What is a serious incident?", log=False) in ROUTES
+
+
+# --------------------------------------------------------------------------
+# Enumeration intent (2026-08-16)
+# --------------------------------------------------------------------------
+
+# Measured on the 100-row set. Pinned because the detector's whole justification
+# is its precision, and a widened regex that quietly costs precision would
+# otherwise look like a recall improvement.
+ENUM_FIRES = {"ag-001", "ag-004", "ag-006", "ag-008", "hn-008"}
+ENUM_FP_BUDGET = 0.05
+
+
+def test_the_enumeration_detector_fires_where_it_was_measured_to(rows):
+    fired = {
+        r["id"] for r in rows
+        if router._ENUMERATE_PROVISION.search(r["question"])
+    }
+    assert fired == ENUM_FIRES
+
+
+def test_the_false_positive_rate_stays_inside_its_budget(rows):
+    """THE STOP CONDITION THIS FEATURE WAS BUILT AGAINST.
+
+    A false negative costs nothing -- the question takes the ranked path it takes
+    today. A false positive puts a whole article into a prompt that did not ask
+    for one, so the detector was specified to be abandoned above ~5%.
+
+    Measured 1 of 80 (`hn-008`, which names Annex III while arguing the opposite
+    of what it says). The rejected wider variant that also matched a plural head
+    noun scored 8 of 10 aggregation rows at 6.2% and would fail here.
+    """
+    answerable = [
+        r for r in rows
+        if r["stratum"] not in ("aggregation", "out-of-scope", "unanswerable")
+    ]
+    fp = [r["id"] for r in answerable if router._ENUMERATE_PROVISION.search(r["question"])]
+    assert len(fp) / len(answerable) <= ENUM_FP_BUDGET, f"false positives: {fp}"
+
+
+def test_enumeration_does_not_change_any_route(rows):
+    """ADR-0012 IS NOT RE-MEASURED BY THIS FEATURE, and that is structural.
+
+    Enumeration is a flag on `RouterResult`, not a sixth rule, so the five rules
+    and the route they return are untouched by construction. This asserts the
+    consequence rather than trusting the construction: every row's route and
+    rule must equal what `eval/router-eval.jsonl` committed for the rules arm.
+    """
+    committed = {
+        r["id"]: r for r in (
+            json.loads(line) for line in
+            (Path(__file__).resolve().parents[1] / "eval" / "router-eval.jsonl")
+            .read_text(encoding="utf-8").splitlines() if line.strip()
+        ) if r.get("router") == "rules"
+    }
+    if not committed:
+        pytest.skip("no committed rules arm in router-eval.jsonl")
+    index = router.build_index()
+    changed = []
+    for row in rows:
+        was = committed.get(row["id"])
+        if not was:
+            continue
+        now = router.route_by_rules(row["question"], index)
+        if (now.route, now.rule) != (was["route"], was["rule"]):
+            changed.append((row["id"], was["route"], now.route))
+    assert changed == [], f"routing moved: {changed}"
+
+
+def test_an_explicit_provision_beats_an_inferred_one():
+    """`ag-008` is the case that matters: the retrieval-derived target picks
+    `aia-art49` and scores 0 of 8 gold; the explicit one picks Annex III and
+    scores 8 of 8."""
+    assert router.enumeration_target(
+        "Which areas of use does Annex III of the AI Act cover?"
+    ) == ("AIA", {"annex": "III"})
+    assert router.enumeration_target(
+        "Which of a deployer's obligations under Article 26 are modified?"
+    ) == ("AIA", {"article": 26})
+    assert router.enumeration_target(
+        "Under the GDPR, what does Article 83 provide?"
+    ) == ("GDPR", {"article": 83})
+    # Annex wins when both appear -- an annex reference is far more specific in
+    # this corpus (13 annexes against 113 articles).
+    assert router.enumeration_target(
+        "Does Article 6 make Annex III systems high-risk?"
+    ) == ("AIA", {"annex": "III"})
+    assert router.enumeration_target("What is a serious incident?") is None
