@@ -101,9 +101,17 @@ SYSTEMS: dict[str, dict[str, Any]] = {
                "label": "Hybrid (graph+vector)"},
     "hybrid-oracle": {"field": "reranked", "route": "gold", "reranks": True,
                       "label": "Hybrid, gold route"},
+    # The lexical-union arm. Identical to `rerank` in every respect except the
+    # candidate pool the cross-encoder ranks: vector top-50 UNION BM25 top-50
+    # UNION Postgres-FTS top-50, which lifts gold-in-pool from 157/203 to
+    # 176/203. Forced to the vector route for the same reason `rerank` is --
+    # this measures a pool change, and letting the router move rows would make
+    # it measure a router.
+    "rerank-pool": {"field": "pool_reranked", "route": "vector", "reranks": True,
+                    "label": "Vector + BM25/FTS pool + Rerank 3.5"},
 }
 
-SYSTEM_ORDER = ("vector", "rerank", "hybrid", "hybrid-oracle")
+SYSTEM_ORDER = ("vector", "rerank", "rerank-pool", "hybrid", "hybrid-oracle")
 
 # THE FOURTH ARM EXISTS BECAUSE THE ROUTER AND THE HYBRID ARE TWO DIFFERENT
 # THINGS AND ONE NUMBER CANNOT MEASURE BOTH.
@@ -252,10 +260,9 @@ def sweep(
     def live_passages(question: str) -> list | None:
         if not live or spec["field"] != "retrieved":
             return None
+        from src.answer.answer_path import PASSAGE_TOP_N
         from src.query.reranker import CANDIDATES
         from src.query.retriever import DIM, retrieve_detailed
-
-        from src.answer.answer_path import PASSAGE_TOP_N
 
         got = retrieve_detailed(question, CANDIDATES, dim=DIM, conn=conn, client=client)
         return got.docs[:PASSAGE_TOP_N]
@@ -717,10 +724,10 @@ def markdown_table(board: dict[str, Any]) -> str:
     excluded = board["common"]["excluded"]
     lines += [
         "",
-        f"^**Not comparable across systems.** These columns use each system's own "
-        f"denominator. `scorable()` drops that system's errored, MAX_TOKENS and "
-        f"canary rows, and they are *different rows in each system*, so the "
-        f"denominators differ ("
+        "^**Not comparable across systems.** These columns use each system's own "
+        "denominator. `scorable()` drops that system's errored, MAX_TOKENS and "
+        "canary rows, and they are *different rows in each system*, so the "
+        "denominators differ ("
         + ", ".join(
             f"{board['labels'][s]} {board[s]['scored']}" for s in board["systems"]
         )

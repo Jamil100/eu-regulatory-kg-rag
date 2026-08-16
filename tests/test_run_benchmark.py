@@ -268,9 +268,19 @@ def test_every_system_in_the_table_is_one_the_roadmap_names_or_a_marked_ceiling(
     """The roadmap names three. `hybrid-oracle` is the fourth and it is a ceiling
     rather than a system, which is why it carries a marker in the table and why
     it is excluded here rather than quietly folded in."""
-    assert set(SYSTEMS) - {ORACLE_SYSTEM} == {"vector", "rerank", "hybrid"}
+    assert set(SYSTEMS) - {ORACLE_SYSTEM} == {
+        "vector", "rerank", "hybrid",
+        # Added 2026-08-16. Not a roadmap system: it is the `rerank` arm with a
+        # wider candidate pool (vector top-50 unioned with BM25 and Postgres-FTS
+        # top-50), measured to decide whether the pool change ships. It is named
+        # here rather than excluded like the oracle because it IS deployable --
+        # `answer_path.LEXICAL_DEPTH_LIVE` is the switch -- so it must not be
+        # quietly exempt from the checks the other deployable arms get.
+        "rerank-pool",
+    }
     assert SYSTEMS["vector"]["field"] == "retrieved", "vector-only replays the pre-rerank draw"
     assert SYSTEMS["rerank"]["field"] == "reranked"
+    assert SYSTEMS["rerank-pool"]["field"] == "pool_reranked"
     assert SYSTEMS["hybrid"]["route"] is None, "the hybrid must use the adopted router"
 
 
@@ -297,15 +307,25 @@ def test_the_live_vector_baseline_does_not_go_through_the_reranker():
     assert 'spec["field"] != "retrieved"' in src
 
 
-def test_the_replayed_orderings_are_the_two_the_artifact_commits():
-    """`vector` and `rerank` differ only in which committed ordering they replay,
-    so a typo in either field name would silently make them the same system."""
+def test_the_replayed_orderings_are_the_ones_the_artifact_commits():
+    """The replay arms differ only in which committed ordering they read, so a
+    typo in any field name would silently make two of them the same system.
+
+    Each ordering must also be paired with ITS OWN score column: attaching
+    `rerank_scores` to the pool ordering would mislabel which arm produced a
+    passage, and the mislabelling would be invisible because both are floats in
+    [0, 1].
+    """
     from src.answer.answer_path import PASSAGE_FIELDS
 
-    assert set(PASSAGE_FIELDS) == {"retrieved", "reranked"}
+    assert set(PASSAGE_FIELDS) == {"retrieved", "reranked", "pool_reranked"}
     assert PASSAGE_FIELDS["retrieved"] == "retrieved_scores"
     assert PASSAGE_FIELDS["reranked"] == "rerank_scores"
-    assert {SYSTEMS[s]["field"] for s in ("vector", "rerank")} == set(PASSAGE_FIELDS)
+    assert PASSAGE_FIELDS["pool_reranked"] == "pool_rerank_scores"
+    assert len(set(PASSAGE_FIELDS.values())) == len(PASSAGE_FIELDS), "a score column is reused"
+    assert {
+        SYSTEMS[s]["field"] for s in ("vector", "rerank", "rerank-pool")
+    } == set(PASSAGE_FIELDS)
 
 
 def test_partially_correct_is_not_counted_as_a_pass():
