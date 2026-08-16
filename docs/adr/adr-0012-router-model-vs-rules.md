@@ -169,3 +169,91 @@ regression turns it load-bearing loudly.
   *"below a confidence heuristic, run both paths"* is not available. `both` is now
   reached only by R4. If that proves too blunt, a confidence-like signal exists
   for free in the linker (count and type of anchors) and was not needed yet.
+
+---
+
+## Amendment, 2026-08-15 — re-measured at 100 rows; the risk this ADR named came true
+
+**Status of the decision: unchanged. Status of the headline number: withdrawn.**
+
+This ADR closed by naming its own failure mode:
+
+> **This is reversible on evidence, not on preference.** `ADOPTED` is one
+> constant. If the eval set at 100 rows shows the rules were fitted — the honest
+> risk — the artifact, the sweep, and the four-arm table are all still here to
+> re-run.
+
+The eval set reached 100 rows on 2026-08-15 and the sweep was re-run. It did show
+the rules were fitted.
+
+| Arm | 23 rows | **100 rows** |
+|---|---|---|
+| rules | 21/22 — **95%** | 70/99 — **71%** |
+| R7B | 10/22 — 45% | 44/99 — 44% |
+| always-vector | 13/22 — 59% | 48/99 — 48% |
+| always-both | — | 47/99 — 47% |
+
+**The adoption stands.** Rules still beat every constant and still beat R7B, which
+is the criterion this ADR actually decided on. Nothing about the choice of
+deterministic rules over the model is disturbed — if anything R7B looks worse, and
+the finding it turned on is unchanged: **R7B emitted `both` 0 times in 99 rows**,
+under the same two prompts, so one whole class is still missing rather than its
+errors being spread over a confusion matrix.
+
+**The 95% is withdrawn as a description of the router.** It was measured on the 23
+questions the rules were written while looking at, and it does not survive contact
+with 77 unseen ones.
+
+### The failure is systematic, and this ADR already named the mechanism
+
+> `both` is now reached only by R4. If that proves too blunt, a confidence-like
+> signal exists for free in the linker (count and type of anchors) and was not
+> needed yet.
+
+It proved too blunt. `R4-second-ask` is one regex —
+`,? and (who|what|how|where|does|is|are|against)` — and **24 rows whose gold is
+`both` are routed `vector`** because they express the second hop in a shape it
+does not match:
+
+| Row | Question shape | Why R4 misses |
+|---|---|---|
+| `th-012` | "…Which GDPR fine tier applies?" | the second hop is semantic, not syntactic; there is no conjoined second clause at all |
+| `th-019` | "when must a controller tell X and when must it tell Y" | `and when` is not in the alternation |
+| `3h-009` | "What assessment must it run, what must it do if…" | comma-separated asks, no `and` |
+| `xr-005`, `xr-010` | single-clause cross-regulation questions | same as `th-012` |
+
+`R2-no-anchor` accounts for the rest, including both `graph` misses (`ag-005`,
+`ag-006`), where the linker reaches nothing a template accepts as an anchor.
+
+### What was done about it, and what deliberately was not
+
+**Not done: retuning the regex.** Widening it against misses that have already
+been seen is how the 95% was produced in the first place. Doing it again, on the
+set the benchmark is about to be computed from, would buy a better number and no
+better router. A future step that wants to fix this should hold out a split first.
+
+**Done: the benchmark stopped confounding two things.** `eval/run_benchmark.py`
+grew a fourth arm, `hybrid-oracle`, which replays the hand-verified gold route.
+The pair is a decomposition rather than a flattering ceiling:
+
+- `hybrid-oracle` — what the hybrid can do when it is asked correctly
+- `hybrid` — what the deployed system does today, and the honest per-query number
+- the gap — **the router's cost, reported as a number instead of as a caveat**
+
+Without it, a weak `hybrid` cell means either "the graph path could not answer" or
+"the router never asked it to", and the table cannot say which. See
+ADR-0015 §Decision 1 and `test_the_router_cost_is_computed_over_rows_both_hybrid_arms_scored`.
+
+### One rule changed status
+
+**R1 (`links to zero nodes → vector`) is no longer inert.** It fired on 0 of 23
+rows and now fires on exactly one of 100: `oos-005`, "What labelling does China's
+deep synthesis regulation require?" — a question about a regulation the corpus
+does not contain, where reaching no node is the correct outcome rather than a
+linker regression. R1 sends it to `vector`, its gold route, so R1 is now a rule
+that earns an answer rather than a guard that never runs.
+
+This is not "out-of-scope rows link nothing": the other four out-of-scope rows do
+link, because they name concepts the EU corpus also uses. Refusal still cannot be
+delegated to retrieval coming back empty. `test_r1_is_load_bearing_on_exactly_one_row`
+pins both halves.
