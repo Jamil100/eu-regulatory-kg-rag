@@ -49,9 +49,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DIM",
+    "MAX_ENUMERATION",
     "RetrievalResult",
     "RetrieverError",
+    "enumerate_provision",
     "retrieve",
+    "retrieve_by_annex",
+    "retrieve_by_article",
     "retrieve_detailed",
     "retrieve_pool_detailed",
 ]
@@ -267,6 +271,100 @@ def retrieve_detailed(
         embed_ms=embed_ms,
         search_ms=search_ms,
     )
+
+
+# An article large enough to be a corpus in itself is not an enumeration target.
+# `aia-art3` is the definitions article at **68** paragraphs; `aia-annex8` is 27
+# and `gdpr-art4` 26. Enumerating any of those would put more text in the prompt
+# than the graph budget ever did, which is the failure mode four measurements
+# have already found. Above this bound `enumerate_provision` returns [] and the
+# caller falls back to ranking -- refusing to enumerate is a valid answer.
+MAX_ENUMERATION = 16
+
+
+def enumerate_provision(
+    regulation: str,
+    *,
+    article: int | None = None,
+    annex: str | None = None,
+    conn: Connection | None = None,
+    limit: int = MAX_ENUMERATION,
+) -> list[ContextDoc]:
+    """Every chunk of one article or one annex, in statutory order.
+
+    This is the deterministic path: no embedding, no reranking, no scoring. The
+    ordering is the legislation's own (`paragraph` / `section, point` ascending),
+    which is the only ordering that is correct by construction rather than by
+    measurement -- and the whole reason this exists is that the measured
+    orderings are what fail on this stratum.
+
+    Returns `[]` rather than raising when the provision does not exist or is
+    larger than `limit`. A missing article is a normal outcome of a detector
+    guessing a target from a question, and the caller's fallback -- ordinary
+    retrieval -- is already correct.
+
+    `score` is None on every doc, for the reason `retrieve_pool_detailed` gives:
+    statutory order is not a relevance scale and must not be sorted against one.
+    """
+    if (article is None) == (annex is None):
+        raise RetrieverError("pass exactly one of article= or annex=")
+
+    if article is not None:
+        where = "regulation = %(reg)s AND article = %(art)s"
+        # `paragraph` and `definition` are disjoint by shape (schema.sql:17-20);
+        # COALESCE orders a paragraph article by paragraph and the definitions
+        # article by definition number without needing to know which it is.
+        order = "COALESCE(paragraph, definition), chunk_id"
+        params: dict[str, object] = {"reg": regulation, "art": article}
+    else:
+        where = "regulation = %(reg)s AND annex = %(annex)s"
+        order = "section NULLS FIRST, point, chunk_id"
+        params = {"reg": regulation, "annex": annex}
+
+    owned = conn is None
+    if conn is None:
+        from src.index.pgvector_schema import connect
+
+        conn = connect()
+    try:
+        rows = conn.execute(
+            f"SELECT chunk_id, text, citation_label FROM chunks "
+            f"WHERE {where} ORDER BY {order} LIMIT %(lim)s",
+            {**params, "lim": limit + 1},
+        ).fetchall()
+    finally:
+        if owned:
+            conn.close()
+
+    # limit + 1 above, then refuse: a truncated enumeration is worse than none.
+    # Half of Article 3 is not "the definitions", it is an arbitrary prefix that
+    # reads as complete, and an answer built on it would be confidently partial.
+    if len(rows) > limit:
+        return []
+
+    return [
+        ContextDoc(
+            chunk_id=chunk_id, text=text, citation_label=citation_label,
+            source="PASSAGE", score=None,
+        )
+        for chunk_id, text, citation_label in rows
+    ]
+
+
+def retrieve_by_article(
+    regulation: str, article: int, *, conn: Connection | None = None,
+    limit: int = MAX_ENUMERATION,
+) -> list[ContextDoc]:
+    """Every paragraph of one article, in statutory order. See `enumerate_provision`."""
+    return enumerate_provision(regulation, article=article, conn=conn, limit=limit)
+
+
+def retrieve_by_annex(
+    regulation: str, annex: str, *, conn: Connection | None = None,
+    limit: int = MAX_ENUMERATION,
+) -> list[ContextDoc]:
+    """Every point of one annex, in statutory order. `annex` is a roman numeral."""
+    return enumerate_provision(regulation, annex=annex, conn=conn, limit=limit)
 
 
 def retrieve_pool_detailed(

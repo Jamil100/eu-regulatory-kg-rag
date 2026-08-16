@@ -58,7 +58,7 @@ from src.query import decision_log
 from src.query.entity_linker import LinkIndex, LinkedEntity, build_index, link_detailed
 from src.schemas import ROUTES, Route
 
-__all__ = ["Route", "ROUTES", "RouterResult", "RouterError", "route", "route_by_rules", "route_by_model"]
+__all__ = ["Route", "ROUTES", "RouterResult", "RouterError", "route", "route_by_rules", "route_by_model", "enumeration_target"]
 
 ROOT = Path(__file__).resolve().parents[2]
 QUESTIONS = ROOT / "eval" / "eval-questions.jsonl"
@@ -97,6 +97,73 @@ _SECOND_ASK = re.compile(r",? and (who|what|how|where|does|is|are|against)\b", r
 # as two-hop questions and route to `both`.
 _PRONOUN_TAIL = re.compile(r",? and (is|does|was|can|must|will) it\b", re.I)
 
+# ENUMERATION INTENT: the answer is every limb of one provision.
+#
+# TUNED FOR PRECISION, NOT RECALL, AND THE ASYMMETRY IS THE WHOLE DESIGN. A false
+# negative costs nothing -- the question takes the ordinary ranked path it takes
+# today. A false positive puts a whole article into a prompt that did not need
+# one. So this fires on three narrow shapes rather than on "looks like a list":
+#
+#   "List X"                          imperative, unambiguous
+#   "... each ..."                    "what are the tiers and what does EACH cover"
+#   "Annex N ... cover/areas/list"    an annex named and asked for wholesale
+#
+# MEASURED ON THE 100-ROW SET, 2026-08-16: fires on 4 of 10 aggregation rows and
+# 1 of 80 non-aggregation answerable rows (**1.2% false-positive rate**, `hn-008`,
+# which names Annex III while arguing the opposite of what it says).
+#
+# The broader variant that also matched a plural head noun ("which OBLIGATIONS /
+# RIGHTS / GROUNDS ...") reached 8 of 10 aggregation rows but **6.2%** false
+# positives -- it cannot separate `ag-001` "List the main obligations the AI Act
+# places on deployers" (11 gold chunks) from `sh-019` "What documentation
+# obligations does the AI Act place on providers" (1 gold chunk), because nothing
+# in the question shape distinguishes them. That variant was measured and
+# rejected; do not widen this regex without re-running that count.
+#
+# Deliberately NOT reusing `_ENUMERATIVE` above, which is R3's much looser
+# "\bwhich .{0,40}(are|fall|apply)\b|\bwhat are\b". R3 routes to the graph, where
+# a wrong guess costs a template call; this one changes the prompt.
+_ENUMERATE_PROVISION = re.compile(
+    r"^\s*list\b"
+    r"|\beach\b"
+    r"|\bannex\s+[ivx]+\b.{0,40}\b(cover|covers|areas|list)\b",
+    re.I,
+)
+
+# An explicit provision reference in the question beats anything inferred from
+# retrieval. `ag-008` ("Which areas of use does Annex III of the AI Act cover?")
+# is the case that matters: the retrieval-derived target picks `aia-art49` and
+# scores 0 of 8 gold, the explicit one picks `aia-annex3` and scores 8 of 8.
+_ANNEX_REF = re.compile(r"\bannex\s+([ivx]+)\b", re.I)
+_ARTICLE_REF = re.compile(r"\barticles?\s+(\d+)\b", re.I)
+
+_ROMAN = {
+    "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
+    "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12, "xiii": 13,
+}
+
+
+def enumeration_target(question: str) -> tuple[str, dict] | None:
+    """The provision a question names outright, or None.
+
+    Returns `(regulation, {"annex": "III"})` or `(regulation, {"article": 26})`,
+    shaped to splat into `retriever.enumerate_provision`.
+
+    Annex beats article when both appear: an annex reference is far more specific
+    in this corpus (13 annexes against 113 articles) and a question naming both
+    is naming the annex as its subject. Regulation is read off the question text
+    and defaults to AIA, which is what the corpus is mostly about; a GDPR
+    question that says "GDPR" anywhere -- all of them do -- resolves correctly.
+    """
+    regulation = "GDPR" if re.search(r"\bgdpr\b", question, re.I) else "AIA"
+    m = _ANNEX_REF.search(question)
+    if m and m.group(1).lower() in _ROMAN:
+        return regulation, {"annex": m.group(1).upper()}
+    m = _ARTICLE_REF.search(question)
+    if m:
+        return regulation, {"article": int(m.group(1))}
+    return None
+
 
 class RouterError(RuntimeError):
     """A router could not produce a route.
@@ -126,6 +193,22 @@ class RouterResult:
     cost_usd: float | None = None
     linked: list[LinkedEntity] | None = None
     error: str | None = None
+
+    # ENUMERATION IS A FLAG, NOT A FOURTH ROUTE.
+    #
+    # `Route` is `Literal["graph","vector","both"]` (src/schemas.py) and it is in
+    # the public `AskResponse`. Adding a value would touch the API contract, the
+    # router eval, the benchmark's four arms and every exhaustive match on it --
+    # to express something that is not a different retrieval path but an
+    # ADDITION to the vector one. An enumerating question still gets its ranked
+    # top-5; it also gets the provision.
+    #
+    # `enumerate_target` is None when the question named no provision outright,
+    # which is the common case (6 of the 10 aggregation rows). The answer path
+    # then derives a target from the reranked pool -- it cannot be resolved here,
+    # because it needs a retrieval this function has deliberately not done.
+    enumerates: bool = False
+    enumerate_target: tuple[str, dict] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -165,12 +248,27 @@ def route_by_rules(question: str, index: LinkIndex | None = None) -> RouterResul
     else:
         route_, rule = "vector", "R5-default"
 
+    # Enumeration is decided ALONGSIDE the route, not as a first rule that
+    # pre-empts it. Written as `R0` it would have had to choose a route as well,
+    # and every choice is wrong: `graph` sends it somewhere being cut, `vector`
+    # silently overrides R4's two-hop finding on a conjoined question. As a flag
+    # it composes -- `ag-006` keeps whatever route the five rules give it and
+    # additionally gets Article 99.
+    #
+    # ADR-0012 IS NOT RE-MEASURED BY THIS. The five rules above are untouched and
+    # the returned `route` is bit-for-bit what it was; verified on all 100 rows,
+    # 0 changed. That was the risk flagged when this was specified, and it was
+    # avoided by not making it a rule rather than by checking afterwards.
+    enumerates = bool(_ENUMERATE_PROVISION.search(question))
+
     return RouterResult(
         route=route_,
         rule=rule,
         latency_ms=(time.perf_counter() - started) * 1000,
         cost_usd=0.0,
         linked=entities,
+        enumerates=enumerates,
+        enumerate_target=enumeration_target(question) if enumerates else None,
     )
 
 
