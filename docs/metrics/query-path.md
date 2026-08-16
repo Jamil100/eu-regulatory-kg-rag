@@ -16,7 +16,12 @@ gain measured here — and delivers **+2 into the prompt**, so it is committed a
 switched off. **Using structure to reorder the pool rather than add to it fails
 too**: article diversity, graph-connectivity boosting and inbound `REFERENCES`
 were measured offline against the committed pools and the best of them is +2
-chunks at p = 0.500. Six levers, none of which moves the ranking stage. The
+chunks at p = 0.500. Six levers, none of which moves the ranking stage. **The
+seventh does not try to: deterministic enumeration reads a whole provision in
+statutory order on the questions that ask for one, and takes aggregation gold in
+the prompt from 12/48 to 33/48** — at 1.2% false positives on the other 80 rows
+and no change to any route. End to end it is 1 win / 0 losses against `rerank`
+over 10 rows, which is directional and not resolvable at that size. The
 graph path now runs end to end: deterministic template selection reaches **24 of
 32 gold chunks — the oracle exactly** — against R7B's 14, at $0.00 and 5.7 ms,
 and `ag-001` comes back **11 of 11** where top-10 similarity cannot return 11
@@ -704,6 +709,124 @@ reference traversal reaches a sixth of the questions. That the causes are
 independent is what makes this a stronger negative than three variants of one
 idea would have been.
 
+#### Deterministic enumeration: the first lever that moves retrieval
+
+Six levers had failed by this point and all six tried to make the ranking stage
+better, either by giving it more to rank or by reordering what it had.
+Enumeration does neither. On questions whose answer is *every limb of one
+provision*, it **removes ranking from the path** and reads the article in
+statutory order — the one ordering that is correct by construction.
+
+**The shape of the stratum is what makes this possible.** 21 of 90 rows have gold
+spanning two or more paragraphs of a single article, including 6 of 10
+aggregation rows; `ag-001`'s gold is all eleven substantive paragraphs of Article
+26. Asking a cross-encoder for "the five paragraphs that answer this" is the
+wrong question when the answer is twelve paragraphs long.
+
+**What was built.** `retrieve_by_article(regulation, article)` and
+`retrieve_by_annex(regulation, annex)` (`src/query/retriever.py`), ordered by
+`paragraph` / `section, point`; the composite indexes `chunks_article` and
+`chunks_annex` that `schema.sql:31-33` never had; and a `MAX_ENUMERATION = 16`
+bound. The bound matters: `aia-art3` is the definitions article at **68**
+paragraphs, and enumerating it would put more in a prompt than the graph budget
+ever did. Over the bound the function returns `[]` and ranking stands — a
+truncated enumeration is worse than none, because half of Article 3 is an
+arbitrary prefix that reads as complete.
+
+**The detector, and the precision it was specified for.** A false negative costs
+nothing; a false positive puts a whole article into a prompt that did not ask for
+one. So it fires on three narrow shapes — `^List`, `each`, and an annex named
+with `cover/areas/list`:
+
+| detector | fires on aggregation | false positives / 80 | FP rate |
+|---|---|---|---|
+| `List` only | 2 / 10 | 0 | 0.0% |
+| `List` \| `each` | 3 / 10 | 0 | 0.0% |
+| **adopted** (+ annex-cover) | **4 / 10** | **1** (`hn-008`) | **1.2%** |
+| + plural head noun | 8 / 10 | 4 | 5.0% |
+| both of the above | 8 / 10 | 5 | **6.2%** |
+
+The wider variants were measured and rejected against the ~5% stop condition.
+They cannot separate `ag-001` "List the main obligations the AI Act places on
+deployers" (11 gold chunks) from `sh-019` "What documentation obligations does the
+AI Act place on providers" (1 gold chunk) — nothing in the question shape
+distinguishes them, and the second is not an enumeration question.
+
+**ADR-0012 IS NOT RE-MEASURED, and structurally rather than by luck.**
+Enumeration is a flag on `RouterResult`, not a sixth rule: the five rules and the
+route they return are untouched. Verified on all 100 rows — **0 route changes, 0
+rule-name changes** against the committed rules arm, asserted by
+`test_enumeration_does_not_change_any_route`. Writing it as `R0` would have
+forced it to pick a route as well, and every choice was wrong: `graph` sends it
+somewhere being cut, `vector` overrides R4's two-hop finding on a conjoined
+question.
+
+**Two design choices that were measured, not assumed.**
+
+*Augment, do not replace.* Substituting the enumeration for the ranked top-5
+reaches 23 of 48 aggregation gold; keeping both reaches **27**, and no row can
+lose gold it already had. Under replacement `ag-004`, `ag-005` and `ag-010` are
+each worse, because the chosen article is not always where the gold is. This is
+also what makes the one false positive cheap: `hn-008` keeps its five passages
+and gains an article it did not need — it costs prompt length, not recall.
+
+*Explicit reference beats inference.* Where the question names a provision, that
+wins; otherwise the target is the modal article over the top 10 reranked
+candidates (`ENUM_VOTE_N`, swept: top-1 and modal@5 reach 20 of 48, modal@10 and
+modal@20 reach 23). `ag-008` is why: the inferred target is `aia-art49` and scores
+**0 of 8**, the explicit one is Annex III and scores **8 of 8**.
+
+**Retrieval result — the largest single gain measured on this corpus:**
+
+| row | target | source | gold before → after | passages |
+|---|---|---|---|---|
+| `ag-001` | AIA Art. 26 | vote | 2 → **11** | 15 |
+| `ag-008` | AIA Annex III | explicit | 0 → **8** | 13 |
+| `ag-006` | AIA Art. 99 | vote | 1 → **4** | 14 |
+| `ag-004` | GDPR Art. 21 | vote | 2 → 3 | 10 |
+| `hn-008` | AIA Annex III | explicit | 1 → 1 | 13 |
+
+**Aggregation gold reaching the prompt: 12 of 48 → 33 of 48.** Corpus-wide the
+equivalent figure is 102 → 123 of 203 (50.2% → 60.6%). For comparison, the
+lexical union — the previous best — moved the corpus figure by +2.
+
+#### Enumeration end to end: it converts retrieval failures into generation failures
+
+Measured on the 10 aggregation rows, majority-of-3 per arm, paired, using the
+reducer in `eval/repeat_report.py`. Three tagged sweeps of `rerank-enum`
+(`enum-a/b/c`) plus a third run of each incumbent, **$0.373** total.
+
+| comparison | incumbent | enum | B wins | B loses | McNemar p |
+|---|---|---|---|---|---|
+| vs `rerank` | 2/10 | **3/10** | 1 (`ag-001`) | **0** | 1.000 |
+| vs `vector` | 0/10 | **3/10** | 3 (`ag-001`, `ag-002`, `ag-010`) | **0** | 0.250 |
+
+**Say it plainly: 10 rows cannot resolve this.** One row is 10 percentage points
+on this denominator, so the smallest observable difference is already twice the
+±5.2pp noise band established for the 100-row cells. The result is directionally
+positive with **zero losing rows in either comparison**, and that is the whole of
+what it supports. It is not a demonstration that enumeration improves accuracy.
+
+**The interesting part is the rows that did not flip.** Retrieval is now solved
+on them and they still fail:
+
+- `ag-006` — all **4 of 4** gold paragraphs of Article 99 in the prompt and cited.
+  Verdict `wrong` on all three runs: the answer mis-pairs the EUR 7.5M and 15M
+  ceilings with the wrong infringement categories. The correct text was in front
+  of it.
+- `ag-008` — all **8 of 8** Annex III points in the prompt and cited, every area
+  listed, nothing invented. `partially_correct`, because the grading rule also
+  wants the Art. 6(2) high-risk consequence, which is in a different article the
+  enumeration does not reach.
+- `ag-003` — the detector did not fire, and the answer omits Art. 83(6). This one
+  a wider detector would have fixed.
+
+So the enumeration did its job and handed the failure downstream. That is
+progress — the aggregation stratum's problem was retrieval and is now
+generation — but it is a different problem, and the accuracy column will not move
+until it is addressed. `MAX_TOKENS` at 2000 is not the constraint: **0
+truncations** across all 30 enumeration generations, on prompts up to 15 passages.
+
 #### Why the end-to-end measurement was not run
 
 The obvious follow-up is a majority-of-3 A/B of the union arm through generation.
@@ -1042,16 +1165,43 @@ down rather than absorbed. Same treatment ADR-0012 gave the router's inert R1.
   connectivity and inbound `REFERENCES` were all measured offline against the
   committed pools, best result +2 chunks at p = 0.500, and all three fail for
   independent reasons. See §Structure as a reordering signal.
-- **Six levers have now been measured and every one of them has failed, which is
-  itself the finding.** Adding graph statements (0 wins / 4 losses), raising the
-  passage cap (+6 chunks, ~80% noise), the lexical union (+19 pool → +2 prompt),
-  article diversity (0 wins at any N), connectivity boosting (+2 at p = 0.500),
-  inbound `REFERENCES` (+1, p = 1.000). **Neither adding material nor reordering
-  it works.** What has never been changed is the relevance signal itself: the
-  cross-encoder is the one component in the narrowing stage that no experiment
-  has replaced, and it is the component the decomposition points at. The next
-  thing tried should be a different ranker, and if the eval set cannot resolve
-  the difference it makes, that is a statement about the eval set.
+- **Six levers were measured and every one failed; the seventh worked by not
+  playing.** Adding graph statements (0 wins / 4 losses), raising the passage cap
+  (+6 chunks, ~80% noise), the lexical union (+19 pool → +2 prompt), article
+  diversity (0 wins at any N), connectivity boosting (+2 at p = 0.500), inbound
+  `REFERENCES` (+1, p = 1.000). All six tried to make the ranking stage better.
+  **Enumeration moved aggregation gold in the prompt from 12/48 to 33/48 by
+  removing the ranking stage from that stratum instead.** The generalisable
+  lesson is not "enumerate more"; it is that the narrowing stage is beyond repair
+  by tuning, and the wins available are in identifying question classes where it
+  can be bypassed by something deterministic.
+- **The relevance signal itself has still never been changed.** The cross-encoder
+  is the one component in the narrowing stage no experiment has replaced, and it
+  is what the 46/6/51 decomposition points at for the 80 rows enumeration does
+  not touch. The next thing tried should be a different ranker, and if the eval
+  set cannot resolve the difference it makes, that is a statement about the eval
+  set.
+- **The aggregation stratum's constraint has moved from retrieval to generation,
+  and nothing yet addresses the new one.** `ag-006` has all 4 gold paragraphs of
+  Art. 99 in the prompt, cites all 4, and is `wrong` on all three runs because it
+  pairs the wrong ceiling with the wrong infringement class; `ag-008` has all 8
+  Annex III points and is `partially_correct` for omitting a consequence stated
+  in a different article. Neither is a retrieval defect. Synthesis over a
+  complete, correctly-ordered provision is the open problem, and it is the first
+  time in this file that sentence has been true.
+- **The end-to-end enumeration result is unresolvable at n=10** — one row is 10pp
+  on that denominator, against a ±5.2pp noise band. It is 1 win / 0 losses vs
+  `rerank` and 3 / 0 vs `vector`, which is encouraging and is not evidence.
+  Resolving it needs more aggregation rows, and `eval-set.md` should treat that
+  as a sampling requirement rather than a nice-to-have: the stratum is 10 rows
+  and it is the one where the system's behaviour is now changing fastest.
+- **The detector reaches 4 of 10 aggregation rows and stops there on purpose.**
+  `ag-003`, `ag-005`, `ag-007` and `ag-009` are enumeration questions the regex
+  does not match, and `ag-003` in particular fails for exactly the reason
+  enumeration would fix. The widened variant that catches them costs 6.2% false
+  positives on the other 80 rows. A better detector is the obvious next
+  increment, and it should be a *classifier over question shape* measured on
+  precision, not more regex alternatives.
 - **`aia-art6-para2` is a recurring single point of failure and has never been
   looked at directly.** It is displaced from the top 5 on `th-015`, `3h-015`,
   `hn-008` and `3h-002`, outranked by `aia-art6-para3` on three of them, and it
