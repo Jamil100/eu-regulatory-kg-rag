@@ -109,9 +109,17 @@ SYSTEMS: dict[str, dict[str, Any]] = {
     # it measure a router.
     "rerank-pool": {"field": "pool_reranked", "route": "vector", "reranks": True,
                     "label": "Vector + BM25/FTS pool + Rerank 3.5"},
+    # The enumeration arm: `rerank` plus, on questions the detector flags, every
+    # limb of one provision read in statutory order. `enumerates` is what makes
+    # the difference; the field and route are `rerank`'s, so the pair isolates
+    # the enumeration and nothing else.
+    "rerank-enum": {"field": "reranked", "route": "vector", "reranks": True,
+                    "enumerates": True,
+                    "label": "Vector + Rerank 3.5 + enumeration"},
 }
 
-SYSTEM_ORDER = ("vector", "rerank", "rerank-pool", "hybrid", "hybrid-oracle")
+SYSTEM_ORDER = ("vector", "rerank", "rerank-pool", "rerank-enum", "hybrid",
+                "hybrid-oracle")
 
 # THE FOURTH ARM EXISTS BECAUSE THE ROUTER AND THE HYBRID ARE TWO DIFFERENT
 # THINGS AND ONE NUMBER CANNOT MEASURE BOTH.
@@ -279,6 +287,26 @@ def sweep(
         conn = pg_connect()
 
     passages = {} if live else replayed_passages(conn, field=spec["field"])
+
+    # THE ENUMERATION ARM IS BUILT HERE RATHER THAN INSIDE `answer()`, because
+    # this is a REPLAY: `passages=` short-circuits the vector branch entirely, so
+    # the enumeration `answer()` would have applied never runs. Building it here
+    # keeps the arm honest -- it replays exactly the passages a live enumerating
+    # request would have assembled, from the same committed ordering, with no
+    # retrieval and no spend.
+    if not live and spec.get("enumerates"):
+        from src.answer.answer_path import ENUM_VOTE_N, _with_enumeration
+        from src.query.router import _ENUMERATE_PROVISION, enumeration_target
+
+        votes = replayed_passages(conn, field=spec["field"], top_n=ENUM_VOTE_N)
+        by_id = {r["id"]: r for r in rows}
+        for qid, docs in list(passages.items()):
+            question = (by_id.get(qid) or {}).get("question")
+            if not question or not _ENUMERATE_PROVISION.search(question):
+                continue
+            passages[qid] = _with_enumeration(
+                docs, votes.get(qid, docs), enumeration_target(question), conn=conn
+            )
 
     if only_strata:
         rows = [r for r in rows if r["stratum"] in only_strata]
