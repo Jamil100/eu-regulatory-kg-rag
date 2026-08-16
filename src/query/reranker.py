@@ -458,6 +458,26 @@ def scoreboard(artifact: list[dict]) -> dict[str, Any]:
         for k in (5, 10):
             out[f"cap_loss@{k}"] = out["pool"] - out[f"oracle@{k}"]
             out[f"order_loss@{k}"] = out[f"oracle@{k}"] - out[f"post@{k}"]
+
+        # THE LEXICAL-UNION ARM, on rows that carry it. Guarded with `all(...)`
+        # rather than assumed: artifacts swept before 2026-08-16 have no `pool`
+        # column, and a KeyError here would make every historical artifact
+        # unreadable by the tool that publishes its numbers.
+        if rows and all("pool_reranked" in r for r in rows):
+            out["union_pool"] = sum(
+                len(set(r["gold"]) & set(r["pool"])) for r in rows
+            )
+            out["union_retrieval_loss"] = gold - out["union_pool"]
+            for k in (5, 10):
+                oracle = sum(
+                    min(len(set(r["gold"]) & set(r["pool"])), k) for r in rows
+                )
+                post = sum(_found(r["pool_reranked"], r["gold"], k) for r in rows)
+                out[f"union_oracle@{k}"] = oracle
+                out[f"union_post@{k}"] = post
+                out[f"union_delta@{k}"] = post - out[f"post@{k}"]
+                out[f"union_cap_loss@{k}"] = out["union_pool"] - oracle
+                out[f"union_order_loss@{k}"] = oracle - post
         return out
 
     strata: dict[str, list[dict]] = collections.defaultdict(list)
@@ -576,6 +596,43 @@ def _report(artifact: list[dict]) -> int:
     if overall["cap_loss@5"] and overall["order_loss@5"] > overall["cap_loss@5"]:
         print(f"  ordering costs {overall['order_loss@5'] / overall['cap_loss@5']:.1f}x "
               "what the cap costs: raising k moves the smaller term.")
+
+    if "union_pool" in overall:
+        # THE HEADLINE OF THIS BLOCK IS THE GAP BETWEEN ITS TWO COLUMNS, so they
+        # are printed side by side rather than in two tables a reader has to
+        # difference by hand: the union buys a large amount of POOL coverage and
+        # almost none of it survives into the PROMPT.
+        sizes = sorted(row["pool_size"] for row in artifact)
+        over = sum(1 for s in sizes if s > 100)
+        print(f"\nlexical union arm (BM25 + Postgres FTS, depth "
+              f"{artifact[0].get('lexical_depth', '?')}), measured not shipped --"
+              f"\nsee answer_path.LEXICAL_DEPTH_LIVE:")
+        print(f"  {'':<22}{'vector pool':>14}{'union pool':>13}{'delta':>8}")
+        print(f"  {'gold in pool':<22}{overall['pool']:>14}{overall['union_pool']:>13}"
+              f"{overall['union_pool'] - overall['pool']:>+8d}")
+        for k in (5, 10):
+            print(f"  {f'gold in top-{k}':<22}{overall[f'post@{k}']:>14}"
+                  f"{overall[f'union_post@{k}']:>13}{overall[f'union_delta@{k}']:>+8d}")
+        print(f"  {'-> retrieval loss':<22}{overall['retrieval_loss']:>14}"
+              f"{overall['union_retrieval_loss']:>13}"
+              f"{overall['union_retrieval_loss'] - overall['retrieval_loss']:>+8d}")
+        print(f"  {'-> cap loss @5':<22}{overall['cap_loss@5']:>14}"
+              f"{overall['union_cap_loss@5']:>13}"
+              f"{overall['union_cap_loss@5'] - overall['cap_loss@5']:>+8d}")
+        print(f"  {'-> ordering loss @5':<22}{overall['order_loss@5']:>14}"
+              f"{overall['union_order_loss@5']:>13}"
+              f"{overall['union_order_loss@5'] - overall['order_loss@5']:>+8d}")
+        print(f"\n  documents sent to rerank: was a flat {CANDIDATES}, now "
+              f"p50 {statistics.median(sizes):.0f}, p95 "
+              f"{sizes[max(0, round(len(sizes) * 0.95) - 1)]}, max {max(sizes)}")
+        units_old = sum(row["search_units"] for row in artifact)
+        units_new = sum(row["pool_search_units"] for row in artifact)
+        print(f"  pools over Cohere's 100-document search unit: {over}/{len(sizes)}")
+        print(f"  billed search units: {units_old:.0f} -> {units_new:.0f} "
+              f"({units_new / units_old:.2f}x)" if units_old else "")
+        print("  READ THIS AS: the union moves gold from a stage that could not "
+              "reach it\n  to a stage that ranks it below noise. Retrieval loss "
+              "falls, ordering loss rises.")
 
     print("\nlatency by component, ms (p50 / p95) -- reported separately because "
           "vector-index.md's\n6.68 ms is SQL only and never included the embedding "

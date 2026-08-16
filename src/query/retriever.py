@@ -47,7 +47,14 @@ from src.schemas import ContextDoc
 if TYPE_CHECKING:
     from psycopg import Connection
 
-__all__ = ["DIM", "RetrievalResult", "RetrieverError", "retrieve", "retrieve_detailed"]
+__all__ = [
+    "DIM",
+    "RetrievalResult",
+    "RetrieverError",
+    "retrieve",
+    "retrieve_detailed",
+    "retrieve_pool_detailed",
+]
 
 # ADR-0004, Accepted 2026-07-31: 512 loses one gold chunk out of 51 against 1536
 # and wins 3x on index size and ~8x on latency. Not a preference -- a decision
@@ -81,10 +88,18 @@ class RetrievalResult:
     cost_usd: float | None = None
     embed_ms: float = 0.0
     search_ms: float = 0.0
+    # Populated only by `retrieve_pool_detailed`. `lexical_ms` is a second SQL
+    # round trip plus the in-process BM25 scan, kept out of `search_ms` so the
+    # vector figure stays comparable to every number measured before the lexical
+    # union existed. `lexical_added` is how many candidates the union contributed
+    # that the vector draw did not already hold -- the quantity that decides
+    # whether the reranker crosses Cohere's 100-document search-unit boundary.
+    lexical_ms: float = 0.0
+    lexical_added: int = 0
 
     @property
     def latency_ms(self) -> float:
-        return self.embed_ms + self.search_ms
+        return self.embed_ms + self.search_ms + self.lexical_ms
 
 
 def get_client() -> Any:
@@ -252,6 +267,92 @@ def retrieve_detailed(
         embed_ms=embed_ms,
         search_ms=search_ms,
     )
+
+
+def retrieve_pool_detailed(
+    question: str,
+    top_k: int = 50,
+    *,
+    dim: int = DIM,
+    conn: Connection | None = None,
+    client: Any | None = None,
+    vector: list[float] | None = None,
+    lexical_depth: int | None = None,
+) -> RetrievalResult:
+    """Vector top-k UNIONED with the lexical candidates. The reranker's input.
+
+    UNION, NOT FUSION. The two orderings are concatenated and deduped; no score
+    is combined, compared or rescaled across them. That is a measured choice, not
+    a simplification -- reciprocal rank fusion of these same two lists LOSES at
+    k=5 (45.3% vs 49.3% for the shipping arm, 9 wins against 17 losses). The
+    lexical arms are here to widen what the cross-encoder can see, and the
+    cross-encoder does the ranking. `src/query/lexical.py` carries the table.
+
+    The vector draw keeps its cosine scores and its order; lexical-only
+    candidates are appended with `score=None`, because BM25 and ts_rank_cd are
+    not on any scale comparable to cosine similarity. Anything downstream that
+    sorts this list on `score` is a defect -- see the module docstring.
+
+    Ordering of the returned list is vector-first, then lexical-only in
+    `lexical_candidates` order. That is a stable enumeration for reproducibility
+    and NOT a relevance claim. Cohere's rerank is order-insensitive (it scores
+    every document against the query independently), so the concatenation order
+    cannot leak into the ranking -- but a future caller that truncates this list
+    would be truncating the lexical arm, which is why the vector draw goes first.
+
+    Set `lexical_depth=0` to get exactly `retrieve_detailed`'s result with the
+    lexical fields zeroed. That is the A/B control, and it is how the benchmark
+    runs the pre-union arm through the identical code path.
+    """
+    from src.query.lexical import LEXICAL_DEPTH, lexical_candidates
+
+    depth = LEXICAL_DEPTH if lexical_depth is None else lexical_depth
+    result = retrieve_detailed(
+        question, top_k, dim=dim, conn=conn, client=client, vector=vector
+    )
+    if depth < 1:
+        return result
+
+    owned = conn is None
+    if conn is None:
+        from src.index.pgvector_schema import connect
+
+        conn = connect()
+    try:
+        started = time.perf_counter()
+        candidates = lexical_candidates(question, conn, depth)
+        have = {doc.chunk_id for doc in result.docs}
+        missing = [chunk_id for chunk_id in candidates if chunk_id not in have]
+        if missing:
+            rows = conn.execute(
+                "SELECT chunk_id, text, citation_label FROM chunks "
+                "WHERE chunk_id = ANY(%s)",
+                (missing,),
+            ).fetchall()
+            # Hydrate in `missing` order, not in the order Postgres returned
+            # them: `= ANY` gives no ordering guarantee, and the artifact this
+            # feeds is diffed between runs.
+            by_chunk = {cid: (text, label) for cid, text, label in rows}
+            for chunk_id in missing:
+                found = by_chunk.get(chunk_id)
+                if found is None:
+                    continue
+                text, label = found
+                result.docs.append(
+                    ContextDoc(
+                        chunk_id=chunk_id,
+                        text=text,
+                        citation_label=label,
+                        source="PASSAGE",
+                        score=None,
+                    )
+                )
+        result.lexical_ms = (time.perf_counter() - started) * 1000
+        result.lexical_added = len(missing)
+    finally:
+        if owned:
+            conn.close()
+    return result
 
 
 def retrieve(
