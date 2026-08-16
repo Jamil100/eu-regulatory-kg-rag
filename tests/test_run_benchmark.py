@@ -81,18 +81,25 @@ def test_accuracy_comes_from_replayed_rows_only():
     assert (cell["pass"], cell["n"]) == (1, 1)
 
 
-def test_cost_and_latency_come_from_live_rows_only():
-    """A replayed row never paid the embed+rerank round trip, so counting its
-    $0.00 would understate the cost column by exactly the vector half."""
-    board = scoreboard([row(mode="replay", cost_usd=0.0, latency_ms=10.0)])
-    assert board["hybrid"]["cost_mean"] is None
-    assert board["hybrid"]["latency_p95"] is None
+def test_latency_comes_from_live_rows_only():
+    """A replayed row never paid the embed+rerank round trip, so its wall clock
+    is not a latency observation.
+
+    THE COST HALF OF THIS TEST WAS REMOVED BY THE 2026-08-16 AMENDMENT, AND THE
+    REPLACEMENT IS STRICTLY BETTER. `$/query` used to be sampled from live rows
+    for the same reason latency is. It is now DERIVED -- generation tokens plus
+    the query embedding plus, where the system reranks, one search unit -- so it
+    is computed over every scored row instead of over whichever subset the live
+    pass could afford, and it cannot drift from the price table. See
+    `test_cost_is_derived_over_every_scored_row_not_sampled` and ADR-0015.
+    """
+    board = scoreboard([row(mode="replay", cost_usd=0.0, latency_ms=10.0)], {})
+    assert board["hybrid"]["latency_p95"] is None, "a replayed row is not a latency sample"
 
     board = scoreboard([
         row(mode="replay"),
         row(mode="live", cost_usd=0.02, latency_ms=4000.0),
-    ])
-    assert board["hybrid"]["cost_mean"] == pytest.approx(0.02)
+    ], {})
     assert board["hybrid"]["latency_p95"] == 4000.0
 
 
@@ -383,3 +390,78 @@ def test_the_table_is_ascii_only():
     artifact = [row(system=s, rid="sh-001") for s in SYSTEM_ORDER]
     table = markdown_table(scoreboard(artifact))
     assert table.isascii(), [c for c in table if not c.isascii()]
+
+
+# --------------------------------------------------------------------------
+# The trimmed protocol (2026-08-16): derived cost, subsampled latency
+# --------------------------------------------------------------------------
+
+def test_cost_is_derived_over_every_scored_row_not_sampled():
+    """$/query is exactly determined by recorded quantities, so it is computed
+    over all scored rows rather than observed on whichever subset the live pass
+    could afford. A live row must not be needed for the cost column at all."""
+    from eval.run_benchmark import analytic_cost
+
+    retrieval = {"sh-001": {"embed": 0.000003, "rerank": 0.002}}
+    board = scoreboard([row(system="rerank", rid="sh-001", cost_usd=0.004)], retrieval)
+    assert board["rerank"]["cost_is_derived"] is True
+    assert board["rerank"]["cost_n"] == 1
+    # generation + embed + rerank, because `rerank` pays a rerank call
+    assert board["rerank"]["cost_mean"] == pytest.approx(0.004 + 0.000003 + 0.002)
+    assert board["rerank"]["cost_mean_sampled"] is None, "no live row was supplied"
+
+
+def test_the_vector_baseline_is_not_charged_for_a_rerank_it_never_makes():
+    from eval.run_benchmark import analytic_cost
+
+    retrieval = {"a": {"embed": 0.000003, "rerank": 0.002}}
+    vec = analytic_cost(row(system="vector", rid="a", cost_usd=0.004), retrieval)
+    rer = analytic_cost(row(system="rerank", rid="a", cost_usd=0.004), retrieval)
+    assert vec == pytest.approx(0.004003)
+    assert rer - vec == pytest.approx(0.002)
+    assert SYSTEMS["vector"]["reranks"] is False
+
+
+def test_an_unpriced_component_propagates_as_none_rather_than_zero():
+    """config.price_of's rule: a route with an unpriced call has an unknown total,
+    and a number silently short is worse than an admitted gap."""
+    from eval.run_benchmark import analytic_cost
+
+    assert analytic_cost(row(rid="a", cost_usd=None), {"a": {"embed": 0.0, "rerank": 0.0}}) is None
+    assert analytic_cost(row(rid="a", cost_usd=0.004), {}) is None
+
+
+def test_the_live_sample_is_deterministic_and_stratified():
+    """Latency does not need every row, but WHICH rows must not depend on when the
+    pass was run."""
+    from eval.run_benchmark import live_sample
+
+    rows = load_questions()
+    a, b = live_sample(rows, 30), live_sample(rows, 30)
+    assert [r["id"] for r in a] == [r["id"] for r in b]
+    assert [r["id"] for r in live_sample(list(reversed(rows)), 30)] == [r["id"] for r in a]
+    assert {r["stratum"] for r in a} == {r["stratum"] for r in rows}, "a stratum was dropped"
+    assert live_sample(rows, 1000) == rows
+
+
+def test_the_p95_carries_its_own_denominator_in_the_table():
+    """A p95 measured on 30 rows and one measured on 100 must not look alike."""
+    artifact = [
+        *[row(system=s, rid="sh-001") for s in SYSTEM_ORDER],
+        *[row(system=s, rid="sh-001", mode="live", latency_ms=4000.0)
+          for s in ("vector", "rerank", "hybrid")],
+    ]
+    table = markdown_table(scoreboard(artifact, {}))
+    assert "(n=1)" in table, "the p95 must publish the n it was measured over"
+
+
+def test_the_oracle_arm_publishes_no_latency_or_cost_claim():
+    """It uses gold route labels a live request does not have, so a per-query
+    figure for it would describe something nobody can run."""
+    artifact = [
+        *[row(system=s, rid="sh-001") for s in SYSTEM_ORDER],
+        row(system=ORACLE_SYSTEM, rid="sh-001", mode="live", latency_ms=4000.0),
+    ]
+    table = markdown_table(scoreboard(artifact, {}))
+    oracle_line = next(l for l in table.splitlines() if "[ceiling]" in l and l.startswith("|"))
+    assert oracle_line.rstrip().endswith("| - | - |"), oracle_line

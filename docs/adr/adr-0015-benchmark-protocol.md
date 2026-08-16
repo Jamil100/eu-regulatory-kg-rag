@@ -38,7 +38,11 @@ It also makes the vector half cost `$0.00` and skips the embed round trip
 entirely, so latency and cost from that pass would be fiction. Hence the second
 pass. Rows carry `mode` and `scoreboard()` keeps them apart;
 `test_accuracy_comes_from_replayed_rows_only` and
-`test_cost_and_latency_come_from_live_rows_only` pin the separation.
+`test_latency_comes_from_live_rows_only` pin the separation.
+
+> **Superseded in part, 2026-08-16.** `$/query` no longer comes from the live pass
+> — it is derived from recorded token counts and costs nothing to compute. Only
+> latency still needs live rows. See the amendment at the foot of this ADR.
 
 This mirrors the split `src/api/ask_eval.py` already draws between the pipeline
 artifact and the interface artifact, for the same reason: one artifact cannot
@@ -168,3 +172,84 @@ stratified holdout with four labels those marginals are themselves noise. The
 disagreement rows are named individually instead, because *which* labels moved
 matters more than how many — a 90% that disagrees on both refusal rows is a worse
 grader than a 90% that disagrees on two single-hop rows.
+
+---
+
+## Amendment, 2026-08-16 — the live pass was trimmed, because the protocol did not fit the key
+
+**What changed:** `$/query` is now **derived** rather than observed, and p95 latency
+is measured on a **stated subsample** rather than on all 100 rows. Accuracy is
+unchanged: still the full replay pass over every row of all four arms.
+
+**Why, stated plainly: I sized the protocol without checking the budget it had to
+run in.** The original design needs ~1,700 API calls:
+
+| | calls |
+|---|---|
+| replay pass, 4 arms x 100 rows x (generate + judge) | 800 |
+| live pass, 4 arms, each row paying its own retrieval | 1,100 |
+
+against a Cohere **Trial key allowance of 1,000 calls per month**. The benchmark
+was therefore unrunnable as specified — not merely expensive, but 700 calls over
+the ceiling *on a fresh month*. This was discovered the worst possible way: the
+quota ran out mid-sweep, after the `vector` arm and three artifact re-sweeps had
+consumed it. One call to check the remaining allowance, before planning, would
+have surfaced it.
+
+**This amendment is forced by a resource limit, not by results, and the
+distinction matters.** Nothing here was chosen after seeing which framing
+flattered a number: only one arm has been swept, its per-row verdicts have
+deliberately not been read (`eval/grade_holdout.py` withholds them so the hand
+sample stays blind), and no accuracy figure has been computed. Amending a
+pre-registered protocol after seeing results is the failure this repo guards
+against everywhere; amending it because the instrument does not fit the bench is
+a different act, and it is recorded here so a reader can tell which one happened.
+
+### `$/query` is derived, and that is an improvement rather than a concession
+
+A live row's cost is one observation of a quantity that is **exactly determined**
+by things already committed to artifacts:
+
+    cost = generation tokens (benchmark.jsonl, replay rows)
+         + query embedding    (rerank-eval.jsonl, embed_cost_usd)
+         + one search unit    (rerank-eval.jsonl, rerank_cost_usd) -- systems that rerank
+
+`analytic_cost()` computes it and `retrieval_costs()` supplies the retrieval half.
+The result is better than the sampled figure on three counts: it covers **every
+scored row** rather than the live subset, it cannot drift from `config.PRICES` the
+way an observed mean can, and it correctly charges the `vector` baseline for **no
+rerank at all** — which the live pass could only achieve because that arm was
+already special-cased to do its own retrieval.
+
+`cost_mean_sampled` is retained beside it so the derived figure can be checked
+against observation once any live rows exist. `None` still propagates rather than
+becoming zero, per `config.price_of`.
+
+### p95 is subsampled, and carries its denominator
+
+`--sample N` takes a deterministic, stratified slice using the same even-spacing
+rule as `judge.holdout`, so *which* rows is a property of the eval set rather than
+of when the pass ran. The table prints `p95 (n=30)`, never a bare `p95`.
+
+This weakens the latency claim and the weakening is visible in the table itself,
+which is the trade. Reporting rule 1 of the original protocol — per-system p95
+published, per-stratum p95 refused — is unaffected: 30 rows still cannot carry a
+per-stratum tail figure, and `test_no_per_stratum_p95_is_published` still holds.
+
+### The oracle arm publishes no latency or cost at all
+
+`hybrid-oracle` replays gold route labels that no live request has. An accuracy
+ceiling from it is meaningful; a per-query cost or latency from it would describe
+a system nobody can run. Its cells in those two columns are `-`, and
+`test_the_oracle_arm_publishes_no_latency_or_cost_claim` pins it.
+
+### Cost of the trimmed protocol
+
+| | calls |
+|---|---|
+| replay, 3 remaining arms | 600 |
+| live, 3 deployable arms x ~30 rows | ~240 |
+| **total to finish** | **~840** |
+
+Inside a 1,000-call month, with headroom for the rate-limit re-runs that this eval
+set reliably produces.

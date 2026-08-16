@@ -93,13 +93,13 @@ EXPECTED_FAIL_BUCKET = "expected_fail"
 # `route: None` means "ask the adopted router"; `route: "gold"` means "replay the
 # eval set's hand-verified label"; anything else forces that route.
 SYSTEMS: dict[str, dict[str, Any]] = {
-    "vector": {"field": "retrieved", "route": "vector",
+    "vector": {"field": "retrieved", "route": "vector", "reranks": False,
                "label": "Vector-only"},
-    "rerank": {"field": "reranked", "route": "vector",
+    "rerank": {"field": "reranked", "route": "vector", "reranks": True,
                "label": "Vector + Rerank 3.5"},
-    "hybrid": {"field": "reranked", "route": None,
+    "hybrid": {"field": "reranked", "route": None, "reranks": True,
                "label": "Hybrid (graph+vector)"},
-    "hybrid-oracle": {"field": "reranked", "route": "gold",
+    "hybrid-oracle": {"field": "reranked", "route": "gold", "reranks": True,
                       "label": "Hybrid, gold route"},
 }
 
@@ -148,6 +148,30 @@ PASSING = ("correct", "correct_refusal")
 # Reported beside the table per roadmap S6 Phase 5.3 -- a per-query cost column
 # with no build cost next to it understates what the system cost to stand up.
 INGESTION_COST_USD = 24.0
+
+
+# The live pass exists only to observe latency, and latency does not need every
+# row. `--sample N` takes a deterministic stratified slice, using the same
+# even-spacing rule as `judge.holdout` so the subset is a property of the eval set
+# rather than of when it was run.
+def live_sample(rows: list[dict], n: int) -> list[dict]:
+    """A stratified, deterministic subset of `n` rows for the live pass."""
+    import collections
+
+    if n >= len(rows):
+        return rows
+    by_stratum: dict[str, list[dict]] = collections.defaultdict(list)
+    for row in sorted(rows, key=lambda r: r["id"]):
+        by_stratum[row["stratum"]].append(row)
+
+    share = n / len(rows)
+    picked: list[dict] = []
+    for stratum in sorted(by_stratum):
+        group = by_stratum[stratum]
+        take = max(1, round(len(group) * share))
+        step = len(group) / take
+        picked.extend(group[int(i * step)] for i in range(take))
+    return sorted(picked, key=lambda r: r["id"])
 
 
 class BenchmarkError(RuntimeError):
@@ -328,6 +352,60 @@ def sweep(
 # Measurement -- PURE. No DB, no key, no spend.
 # --------------------------------------------------------------------------
 
+# $/QUERY IS COMPUTED, NOT SAMPLED, AND THAT IS AN IMPROVEMENT RATHER THAN A
+# CONCESSION.
+#
+# A live row's `cost_usd` is one observation of a quantity that is exactly
+# determined by things already recorded: the generation tokens (in this
+# artifact's replay rows) plus the query embedding and, for the systems that
+# rerank, one rerank search unit (both in `eval/rerank-eval.jsonl`). Deriving it
+# gives the cost over ALL 100 rows instead of over whichever subset the live pass
+# could afford, and it cannot drift from the price table the way a sampled mean
+# can.
+#
+# The replay row's own `cost_usd` is generation only: passages are injected, so no
+# embed or rerank call is made, and the graph path is Cypher plus a local entity
+# index and costs nothing. `retrieval_costs()` supplies the rest.
+def retrieval_costs(path: Path | None = None) -> dict[str, dict[str, float]]:
+    """Per-question embed and rerank cost, from the committed rerank artifact.
+
+    Pure: one file read, no network. Keyed by eval row id.
+    """
+    path = path or (ROOT / "eval" / "rerank-eval.jsonl")
+    out: dict[str, dict[str, float]] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        out[row["id"]] = {
+            "embed": row.get("embed_cost_usd") or 0.0,
+            "rerank": row.get("rerank_cost_usd") or 0.0,
+        }
+    return out
+
+
+def analytic_cost(row: dict, retrieval: dict[str, dict[str, float]]) -> float | None:
+    """What one live request for this row on this system would cost.
+
+    None propagates rather than becoming zero, for the reason `config.price_of`
+    gives: a route containing an unpriced component has an unknown total, and a
+    number that is silently short is worse than an admitted gap.
+    """
+    generation = row.get("cost_usd")
+    if generation is None:
+        return None
+    parts = retrieval.get(row["id"])
+    if parts is None:
+        return None
+    spec = SYSTEMS.get(row["system"], {})
+    total = generation + parts["embed"]
+    if spec.get("reranks"):
+        total += parts["rerank"]
+    return total
+
+
 def load_artifact(path: Path | None = None) -> list[dict]:
     path = path or ARTIFACT
     if not path.exists():
@@ -356,7 +434,8 @@ def _p(values: list[float], q: float) -> float | None:
     return ordered[index]
 
 
-def scoreboard(artifact: list[dict]) -> dict[str, Any]:
+def scoreboard(artifact: list[dict],
+               retrieval: dict[str, dict[str, float]] | None = None) -> dict[str, Any]:
     """Every published number, recomputed from the artifact alone.
 
     Pure -- no database, no API key, no network. That is what lets the tests and
@@ -367,6 +446,7 @@ def scoreboard(artifact: list[dict]) -> dict[str, Any]:
     `mode == "live"` rows. Mixing them would put a $0.00 replayed vector row into
     the cost column. See reporting rule 1 in the module docstring.
     """
+    retrieval = retrieval_costs() if retrieval is None else retrieval
     replay = [r for r in artifact if r.get("mode") == "replay"]
     live = [r for r in artifact if r.get("mode") == "live"]
     systems = [s for s in SYSTEM_ORDER if any(r["system"] == s for r in artifact)]
@@ -454,7 +534,9 @@ def scoreboard(artifact: list[dict]) -> dict[str, Any]:
             if r["system"] == system and not r.get("error") and r.get("latency_ms")
         ]
         latencies = [r["latency_ms"] for r in live_rows if r.get("attempts", 1) == 1]
+        # Sampled, kept only as a cross-check on the derived figure below.
         costs = [r["cost_usd"] for r in live_rows if r.get("cost_usd") is not None]
+        derived = [c for c in (analytic_cost(r, retrieval) for r in rows) if c is not None]
 
         board[system] = {
             "scored": len(rows),
@@ -481,10 +563,16 @@ def scoreboard(artifact: list[dict]) -> dict[str, Any]:
             "latency_p50": statistics.median(latencies) if latencies else None,
             "latency_p95": _p(latencies, 0.95),
             "latency_max": max(latencies, default=None) if latencies else None,
-            "cost_mean": statistics.mean(costs) if costs else None,
-            "cost_total": sum(costs) if costs else None,
+            # THE PUBLISHED $/query. Derived over every scored row.
+            "cost_mean": statistics.mean(derived) if derived else None,
+            "cost_total": sum(derived) if derived else None,
+            "cost_n": len(derived),
+            "cost_is_derived": True,
+            # The live observations, retained only so the two can be compared.
+            "cost_mean_sampled": statistics.mean(costs) if costs else None,
             "live_n": len(live_rows),
-            "unpriced": len(live_rows) - len(costs),
+            "latency_n": len(latencies),
+            "unpriced": len(rows) - len(derived),
             # The three refusal modes, individually. NEVER averaged.
             "refusal": {
                 stratum: {
@@ -540,8 +628,16 @@ def markdown_table(board: dict[str, Any]) -> str:
             cells.append(f"{got['pass']}/{got['n']}" if got else "-")
         refusal_pass = sum(v["pass"] for v in cell["refusal"].values())
         refusal_n = sum(v["n"] for v in cell["refusal"].values())
-        p95 = f"{cell['latency_p95']/1000:.1f} s" if cell["latency_p95"] else "-"
+        p95 = (
+            f"{cell['latency_p95']/1000:.1f} s (n={cell['latency_n']})"
+            if cell["latency_p95"] else "-"
+        )
         cost = f"${cell['cost_mean']:.4f}" if cell["cost_mean"] is not None else "-"
+        if system == ORACLE_SYSTEM:
+            # A ceiling that uses gold route labels is not a deployable system, so
+            # publishing its latency or per-query cost would be a claim about
+            # something nobody can run. Accuracy only.
+            p95, cost = "-", "-"
         label = board["labels"][system]
         if system == DEPLOYED_SYSTEM:
             label = f"**{label}**"
@@ -698,6 +794,11 @@ def main() -> int:
         help="pay the whole request instead of replaying passages; this is the pass "
              "the latency and cost columns come from",
     )
+    parser.add_argument(
+        "--sample", type=int, default=0,
+        help="live pass only: measure latency on a deterministic stratified subset "
+             "of N rows instead of all 100. $/query is derived and needs no live row.",
+    )
     parser.add_argument("--markdown", action="store_true", help="print only the README table")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -709,8 +810,11 @@ def main() -> int:
         if not args.system:
             parser.error("--refresh needs --system (one system per invocation; see the docstring)")
         mode = "live" if args.live else "replay"
-        print(f"sweeping {args.system!r} over the eval set ({mode})", file=sys.stderr)
-        fresh = sweep(load_questions(), args.system, live=args.live)
+        questions = load_questions()
+        if args.live and args.sample:
+            questions = live_sample(questions, args.sample)
+        print(f"sweeping {args.system!r} over {len(questions)} rows ({mode})", file=sys.stderr)
+        fresh = sweep(questions, args.system, live=args.live)
         existing = [
             row for row in (load_artifact() if ARTIFACT.exists() else [])
             if not (row.get("system") == args.system and row.get("mode") == mode)
