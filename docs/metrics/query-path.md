@@ -794,7 +794,7 @@ modal@20 reach 23). `ag-008` is why: the inferred target is `aia-art49` and scor
 equivalent figure is 102 → 123 of 203 (50.2% → 60.6%). For comparison, the
 lexical union — the previous best — moved the corpus figure by +2.
 
-#### Enumeration end to end: it converts retrieval failures into generation failures
+#### Enumeration end to end: 1 win, 0 losses, and not resolvable at n=10
 
 Measured on the 10 aggregation rows, majority-of-3 per arm, paired, using the
 reducer in `eval/repeat_report.py`. Three tagged sweeps of `rerank-enum`
@@ -817,7 +817,13 @@ on them and they still fail:
 - `ag-006` — all **4 of 4** gold paragraphs of Article 99 in the prompt and cited.
   Verdict `wrong` on all three runs: the answer mis-pairs the EUR 7.5M and 15M
   ceilings with the wrong infringement categories. The correct text was in front
-  of it.
+  of it. **→ CORRECTED the next session: this is not a synthesis failure.** The
+  correct text was in front of it and so was Article 100, the fine schedule for
+  Union institutions, sitting at ranks 1 and 3 of the ranked passages that
+  enumeration appends. The wrong figures are copied from there. See §Synthesis on
+  enumerated provisions — dropping the ranked tail fixes the row, and the
+  "generation is the new constraint" reading below is right for `ag-008` and
+  wrong for this one.
 - `ag-008` — all **8 of 8** Annex III points in the prompt and cited, every area
   listed, nothing invented. `partially_correct`, because the grading rule also
   wants the Art. 6(2) high-risk consequence, which is in a different article the
